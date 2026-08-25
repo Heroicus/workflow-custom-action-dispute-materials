@@ -1,0 +1,53 @@
+{
+  "title": "案件材料上传后按 table_id + record_id 投递分析任务",
+  "status": "disabled",
+  "steps": [
+    {
+      "id": "trigger_material_ready",
+      "type": "SetRecordTrigger",
+      "title": "当前记录材料就绪时触发",
+      "next": "submit_dispute_materials",
+      "data": {
+        "table_name": "诉讼仲裁案件信息汇总表",
+        "precondition": "案件编号非空且上传材料非空且上传人非空",
+        "record_watch_conjunction": "and",
+        "record_watch_info": [],
+        "field_watch_info": [
+          {
+            "field_name": "上传材料",
+            "operator": "isNotEmpty",
+            "value": []
+          },
+          {
+            "field_name": "案件编号",
+            "operator": "isNotEmpty",
+            "value": []
+          },
+          {
+            "field_name": "上传人",
+            "operator": "isNotEmpty",
+            "value": []
+          }
+        ],
+        "trigger_control_list": [],
+        "condition_list": null
+      }
+    },
+    {
+      "id": "submit_dispute_materials",
+      "type": "CustomAction",
+      "title": "提交案件材料分析任务",
+      "next": null,
+      "data": {
+        "component_block_type_id": "blk_6a7e783b4b408cb2ed5d02ca",
+        "form_mapping": {
+          "recordId": "当前记录.record_id",
+          "targetTableId": "当前记录.table_id"
+        },
+        "contract": "3.3.3-record-id-only-preflight-and-single-dispatch",
+        "result": "accepted,dispatchState,agentChatId,recordId,buildId,logId",
+        "forbidden": "do not upload attachment bytes, create a second chat, or resolve a different record by case number"
+      }
+    }
+  ]
+}

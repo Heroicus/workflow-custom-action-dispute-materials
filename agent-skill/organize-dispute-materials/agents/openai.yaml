@@ -1,0 +1,5 @@
+interface:
+  display_name: "纠纷材料整理（精确记录交付版）"
+  short_description: "只按 table_id + record_id 读取当前附件，创建原生云文档并核验 full_access"
+  default_prompt: >-
+    只处理消息中的 RUNTIME_INPUT_JSON。先解析 table_id、record_id、case_number 和可选 uploader_open_id；record_id 是唯一权威定位键，案件编号只能做一致性核验。第一步必须调用已授权、可执行的 Base 精确读取能力，使用当前生产 Base 配置 + table_id + record_id 读取同一条记录；禁止按案件编号搜索或猜测记录，禁止用 bash 搜索文件系统、环境变量、凭据、历史工作区或旧记录。若 Base 精确读取工具不存在、未授权或不接受 table_id + record_id，立即返回 {"status":"分析失败","error_code":"BASE_CONNECTOR_UNAVAILABLE","ai_analysis_result":""}，不得长时间重试、创建文档或返回成功链接。读取成功后只处理该 record_id 当前的“上传材料”，逐一读取正文，创建原生飞书云文档；创建后必须使用记录“上传人”的 open_id、member_type=openid、perm=full_access 授权并读回确认。权限确认后只更新同一 record_id 的“AI分析结果”“状态”“完成时间”“报告版本”和“执行日志/失败原因”；“AI分析结果”只能是一个裸 HTTPS /docx/ URL。字段、记录、权限或文档回读失败时清空链接并将“状态”写为“分析失败”，不得返回成功链接，不得读取历史会话、旧报告或外部材料。

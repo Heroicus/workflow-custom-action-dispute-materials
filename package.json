@@ -1,20 +1,25 @@
 {
-  "name": "action-demo",
-  "version": "1.0.0",
-  "description": "",
+  "name": "organize-dispute-materials-workflow-shortcut",
+  "version": "3.3.3",
+  "description": "Feishu Base workflow record-scoped adapter that sends table_id + record_id to the dispute-materials agent",
   "main": "index.js",
   "scripts": {
-    "dev": "lark-base-open-cli dev:action",
-    "build": "lark-base-open-cli build:action",
-    "pack": "lark-base-open-cli pack:action"
+    "build": "block-basekit-cli build",
+    "preview": "block-basekit-cli preview",
+    "upload": "block-basekit-cli upload",
+    "test:logic": "rm -rf .test-dist && tsc --target ES2020 --module commonjs --esModuleInterop --skipLibCheck --types node --outDir .test-dist src/analysis.ts && node --test test/analysis.test.mjs",
+    "test:action": "npm run build && node --test test/action.test.mjs",
+    "test:skill": "node --test test/skill-contract.test.mjs",
+    "test": "tsc --noEmit && npm run test:logic && npm run test:action && npm run test:skill && node --test test/boundary.test.mjs test/skill-package.test.mjs"
   },
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@lark-base-open/cli": "1.0.1-alpha.10",
-    "@types/node": "^14.18.36"
+    "@lark-opdev/block-basekit-cli": "^1.0.5",
+    "@types/node": "^14.18.36",
+    "globby": "11.1.0"
   },
   "dependencies": {
-    "@lark-base-open/faas-sdk": "1.0.1-alpha.7"
+    "@lark-opdev/block-basekit-server-api": "^1.0.6"
   }
 }

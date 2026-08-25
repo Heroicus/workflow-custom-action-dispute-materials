@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "template": "assets/reference-template.docx",
+  "source_table_count": 35,
+  "expected_source_table_count": 35,
+  "formal_table_count": 34,
+  "expected_formal_table_count": 34,
+  "checked_headers": 35,
+  "errors": [],
+  "warnings": []
+}

@@ -1,19 +1,7 @@
-import { testAction } from '@lark-base-open/faas-sdk';
-
-async function run() {
-  testAction({
-    // 执行的 action id
-    actionId: 'rmb-usd-rate',
-    // execute 中的 formItemParams
-    formItemParams: {
-      account: 1
-    },
-    // execute 中的 context（fetch 已内置，无需在传入）
-    context: {
-      timeZone: 'Asia/Shanghai',
-      tableID: '',
-    }
-  })
-}
-
-run();
+/**
+ * The official starter's interactive runner used the retired faas-sdk and an
+ * obsolete tmp_url attachment shape. The executable regression suite lives in
+ * action.test.mjs and analysis.test.mjs, where exact-record preflight, app
+ * identity, one-shot Aily dispatch and the no-attachment-bytes boundary are covered.
+ */
+export {};
