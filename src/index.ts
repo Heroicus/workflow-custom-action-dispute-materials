@@ -14,7 +14,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "5.4.0-v5-simple-report";
+const BUILD_ID = "5.4.1-balanced-template-fill";
 const REQUEST_TIMEOUT_MS = 10_000;
 const RUNNING_TTL_MS = 20 * 60 * 1000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;

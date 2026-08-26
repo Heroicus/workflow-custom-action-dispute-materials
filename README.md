@@ -1,6 +1,6 @@
 # 纠纷材料整理工作流组件
 
-当前发布版本：`5.4.0`
+当前发布版本：`5.4.1`
 对应业务设计：桌面《纠纷材料整理工作流 V5.0 精简设计文档（审核修订版）》
 
 ```text
@@ -50,6 +50,6 @@ targetRecordId = 第 1 步新增案件记录.Record ID
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v5.4.0.zip --json
-unzip -t output/organize-dispute-materials-v5.4.0.zip
+  --output output/organize-dispute-materials-v5.4.1.zip --json
+unzip -t output/organize-dispute-materials-v5.4.1.zip
 ```
