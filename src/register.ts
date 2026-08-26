@@ -1,4 +1,3 @@
 // The official Base automation starter discovers this entrypoint.
-// Keep the implementation in index.ts so the independent action tests can
-// exercise the same registration and execution code.
+// Registration stays centralized in index.ts so every build uses one action implementation.
 export { default } from './index';

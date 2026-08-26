@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Create a clean root-level ZIP package for the Skill.
 
-The packager is intentionally conservative.  It rejects hidden files,
-symlinks, path traversal, bytecode, local IDE state, and files outside the
-source root.  The resulting archive has ``SKILL.md`` at its root, which is the
-layout expected by the Aily import flow.
+The packager is intentionally conservative.  It packages an explicit
+production allow-list only, rejects symlinks and unsafe members, and never
+recursively sweeps the source tree.  The resulting archive has ``SKILL.md`` at
+its root, which is the layout expected by the Aily import flow.
 """
 import argparse
 import hashlib
 import json
-import os
 import sys
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
-EXCLUDED_NAMES = {".DS_Store", "Thumbs.db"}
-EXCLUDED_DIRS = {"__pycache__"}
-EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
+PACKAGE_MEMBERS = (
+    "SKILL.md",
+    "README.md",
+    "agents/openai.yaml",
+    "references/feishu-runtime-contract.md",
+    "references/report-table-map.md",
+)
 
 
 class PackageFailure(Exception):
@@ -53,17 +56,7 @@ def validate_source(root: Path) -> Path:
     resolved = root.expanduser().resolve(strict=True)
     if not resolved.is_dir():
         raise PackageFailure(f"source is not a directory: {resolved}")
-    required = [
-        resolved / "SKILL.md",
-        resolved / "README.md",
-        resolved / "agents" / "openai.yaml",
-        resolved / "references" / "feishu-runtime-contract.md",
-        resolved / "references" / "template-signature.json",
-        resolved / "assets" / "reference-template.docx",
-        resolved / "scripts" / "validate_template.py",
-        resolved / "scripts" / "inventory_attachments.py",
-        resolved / "scripts" / "validate_delivery.py",
-    ]
+    required = [resolved / member for member in PACKAGE_MEMBERS]
     missing = [str(item.relative_to(resolved)) for item in required if not item.is_file()]
     if missing:
         raise PackageFailure(f"required package files are missing: {', '.join(missing)}")
@@ -81,40 +74,22 @@ def sha256_file(path: Path) -> str:
 
 
 def collect_files(root: Path) -> list[PackageFile]:
-    """Collect only regular, non-hidden files below root."""
+    """Collect the explicit production allow-list and nothing else."""
 
     collected: list[PackageFile] = []
-    for current, directories, names in os.walk(root, topdown=True, followlinks=False):
-        current_path = Path(current)
-        kept_dirs: list[str] = []
-        for name in sorted(directories):
-            path = current_path / name
-            relative = path.relative_to(root)
-            if name in EXCLUDED_DIRS:
-                continue
-            if path.is_symlink():
-                raise PackageFailure(f"symbolic link directory is forbidden: {relative}")
-            if is_hidden_relative(relative):
-                raise PackageFailure(f"hidden directory is forbidden: {relative}")
-            kept_dirs.append(name)
-        directories[:] = kept_dirs
-        for name in sorted(names):
-            path = current_path / name
-            relative = path.relative_to(root)
-            if path.is_symlink():
-                raise PackageFailure(f"symbolic link file is forbidden: {relative}")
-            if is_hidden_relative(relative) or name in EXCLUDED_NAMES:
-                raise PackageFailure(f"hidden or metadata file is forbidden: {relative}")
-            if path.suffix.lower() in EXCLUDED_SUFFIXES:
-                raise PackageFailure(f"bytecode file is forbidden: {relative}")
-            if not path.is_file():
-                raise PackageFailure(f"non-regular file is forbidden: {relative}")
-            mode = path.stat().st_mode & 0o777
-            if mode & 0o111:
-                raise PackageFailure(f"executable bit is forbidden in package source: {relative}")
-            member = relative.as_posix()
-            collected.append(PackageFile(path, member, sha256_file(path), path.stat().st_size))
-    collected.sort(key=lambda item: item.member)
+    for member in sorted(PACKAGE_MEMBERS):
+        relative = Path(member)
+        if relative.is_absolute() or ".." in relative.parts or is_hidden_relative(relative):
+            raise PackageFailure(f"unsafe package member: {member}")
+        path = root / relative
+        if path.is_symlink():
+            raise PackageFailure(f"symbolic link file is forbidden: {relative}")
+        if not path.is_file():
+            raise PackageFailure(f"required package file is missing: {relative}")
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o111:
+            raise PackageFailure(f"executable bit is forbidden in package source: {relative}")
+        collected.append(PackageFile(path, relative.as_posix(), sha256_file(path), path.stat().st_size))
     return collected
 
 

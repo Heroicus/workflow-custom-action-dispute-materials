@@ -1,39 +1,66 @@
+export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v3";
+export const DISPATCH_OPERATION = "process_target_record";
+export const REQUIRED_SKILL_VERSION = "5.3.0";
+export const REPORT_CONTRACT_VERSION = "dispute-report/5.3.0";
+export const TEMPLATE_DOCUMENT_TOKEN = "Kk2edGa13oOrh8xuyM5ced3Gnhh";
+export const TEMPLATE_DOCUMENT_URL = "https://aixuexi.feishu.cn/docx/Kk2edGa13oOrh8xuyM5ced3Gnhh";
+
+export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";
+export const PRODUCTION_TABLE_ID = "tbllz7nrxSIH8frX";
+export const BASELINE_FIELD_NAME = "材料处理基线";
+
+export const PRODUCTION_FIELD_CONTRACT = {
+  case_number: { id: "fldnDqIuar", name: "案件编号", access: "read_only" },
+  case_name: { id: "fldZ1S4MD3", name: "案件名称", access: "read_write" },
+  case_type: { id: "fldZCjfhMY", name: "案件类型", access: "read_write", options: ["诉讼", "仲裁"] },
+  filing_date: { id: "fld9zzBKtm", name: "立案（收案）日期", access: "read_write" },
+  case_status: { id: "fldRlZJrNA", name: "案件状态", access: "read_write", options: ["待立案", "审理中", "已结案", "已归档"] },
+  attachments: { id: "fldOz2CYX4", name: "案件文档", access: "read_only" },
+  uploader: { id: "fldpXEeboF", name: "上传人", access: "read_only" },
+  processing_status: {
+    id: "fldHeuCxLE",
+    name: "AI处理状态",
+    access: "read_write",
+    options: ["待处理", "分析中", "待法务审核", "已完成", "分析失败"],
+  },
+  analysis_result: { id: "fldDH6CfUI", name: "AI分析结果", access: "read_write" },
+  execution_log: { id: "fldeBcCdyM", name: "执行日志/失败原因", access: "read_write" },
+  material_baseline: { id: "dynamic", name: BASELINE_FIELD_NAME, access: "read_write" },
+} as const;
+
+export type DispatchMode = "initial" | "supplement";
+
 export type AnalysisPromptInput = {
-  caseNumber: string;
-  recordId: string;
-  tableId: string;
-  uploaderOpenId?: string;
+  targetRecordId: string;
+  dispatchId: string;
+  mode: DispatchMode;
+  newAttachmentIds: string[];
+  componentBuild: string;
 };
 
-/**
- * Build the one-shot handoff message. The record ID is authoritative; the case
- * number has already been read from that exact record and is only downstream
- * consistency context, never a workflow input or lookup key.
- */
+function requiredText(value: unknown, label: string): string {
+  const text = String(value || "").trim();
+  if (!text) throw new Error(`${label}为空`);
+  return text;
+}
+
 export function buildAnalysisPrompt(input: AnalysisPromptInput): string {
-  const caseNumber = String(input?.caseNumber || "").trim();
-  const recordId = String(input?.recordId || "").trim();
-  const tableId = String(input?.tableId || "").trim();
-  const uploaderOpenId = String(input?.uploaderOpenId || "").trim();
-  if (!caseNumber) throw new Error("目标记录中的案件编号为空，无法提交智能体分析任务");
-  if (!recordId) throw new Error("目标记录 ID 为空，禁止按案件编号猜测记录");
-  if (!tableId) throw new Error("目标数据表 ID 为空，无法限定记录范围");
-  const uploaderLine = uploaderOpenId ? `上传人 open_id：${uploaderOpenId}` : "";
-  const runtimeInput = {
-    table_id: tableId,
-    record_id: recordId,
-    case_number: caseNumber,
-    ...(uploaderOpenId ? { uploader_open_id: uploaderOpenId } : {}),
-  };
-  return [
-    "RUNTIME_INPUT_JSON（机器契约，必须原样使用）：",
-    JSON.stringify(runtimeInput),
-    "只处理上述 table_id + record_id 指向的同一条记录；record_id 是唯一定位键，案件编号只做一致性核验。",
-    "第一步必须调用已授权的 Base 精确读取能力；禁止按案件编号搜索、猜测记录，禁止用 bash 搜索文件、环境变量、凭据或历史工作区。",
-    "如果运行时没有可执行的 Base 精确读取工具，立即返回 error_code=BASE_CONNECTOR_UNAVAILABLE，不得长时间重试、创建文档或返回成功链接。",
-    "随后只读取该记录当前的“上传材料”，完成原生飞书云文档、上传人 full_access 权限读回和同记录最终字段回写。",
-    uploaderLine,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  return JSON.stringify({
+    type: DISPATCH_CONTRACT_TYPE,
+    operation: DISPATCH_OPERATION,
+    app_token: PRODUCTION_APP_TOKEN,
+    table_id: PRODUCTION_TABLE_ID,
+    record_id: requiredText(input.targetRecordId, "targetRecordId"),
+    dispatch_id: requiredText(input.dispatchId, "dispatchId"),
+    mode: input.mode,
+    new_attachment_ids: [...new Set(input.newAttachmentIds)].sort(),
+    component_build: requiredText(input.componentBuild, "componentBuild"),
+    required_skill_version: REQUIRED_SKILL_VERSION,
+    report_contract_version: REPORT_CONTRACT_VERSION,
+    baseline_field_name: BASELINE_FIELD_NAME,
+    template_document_token: TEMPLATE_DOCUMENT_TOKEN,
+    template_document_url: TEMPLATE_DOCUMENT_URL,
+    template_document_type: "docx",
+    field_contract: PRODUCTION_FIELD_CONTRACT,
+  });
 }
