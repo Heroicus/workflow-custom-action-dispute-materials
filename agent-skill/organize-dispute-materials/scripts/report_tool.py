@@ -158,11 +158,12 @@ def element_text(element: ET.Element) -> str:
     return normalize_text("".join(element.itertext()))
 
 
-def first_row_cells(table: ET.Element) -> list[str]:
-    row = next((item for item in table.iter() if local_name(item.tag) == "tr"), None)
-    if row is None:
-        return []
-    return [element_text(cell) for cell in list(row) if local_name(cell.tag) in {"td", "th"}]
+def table_rows(table: ET.Element) -> list[list[str]]:
+    return [
+        [element_text(cell) for cell in list(row) if local_name(cell.tag) in {"td", "th"}]
+        for row in table.iter()
+        if local_name(row.tag) == "tr"
+    ]
 
 
 def template_cell_pattern(value: str) -> tuple[str, bool]:
@@ -176,11 +177,61 @@ def structure_signature(root: ET.Element) -> list[tuple[str, Any]]:
         if name in {"h1", "h2"}:
             signature.append((name, element_text(element)))
         elif name == "table":
-            signature.append((name, first_row_cells(element)))
+            signature.append((name, table_rows(element)))
     return signature
 
 
-def compare_structure(actual: ET.Element, template_root: ET.Element, schema: dict[str, Any]) -> None:
+def dynamic_table_flags(template: str) -> list[bool]:
+    tables = re.findall(r"<table(?:\s[^>]*)?>.*?</table>", template, flags=re.DOTALL | re.IGNORECASE)
+    return [bool(ROW_PATTERN.search(table)) for table in tables]
+
+
+def compare_table(
+    expected_rows: list[list[str]],
+    actual_rows: list[list[str]],
+    allows_dynamic_rows: bool,
+    position: int,
+) -> None:
+    if allows_dynamic_rows:
+        if len(actual_rows) < len(expected_rows):
+            raise ReportError("REPORT_STRUCTURE_INVALID", "动态表格缺少固定行", {"position": position})
+    elif len(expected_rows) != len(actual_rows):
+        raise ReportError(
+            "REPORT_STRUCTURE_INVALID",
+            "固定表格行数不正确",
+            {"position": position, "expected": len(expected_rows), "actual": len(actual_rows)},
+        )
+    for row_index, (expected_cells, actual_cells) in enumerate(zip(expected_rows, actual_rows)):
+        if len(expected_cells) != len(actual_cells):
+            raise ReportError(
+                "REPORT_STRUCTURE_INVALID",
+                "表格列数不正确",
+                {"position": position, "row": row_index},
+            )
+        for cell_index, (template_cell, actual_cell) in enumerate(zip(expected_cells, actual_cells)):
+            static_text, has_marker = template_cell_pattern(template_cell)
+            if has_marker:
+                if static_text and static_text not in actual_cell:
+                    raise ReportError(
+                        "REPORT_STRUCTURE_INVALID",
+                        "表格固定标签不正确",
+                        {"position": position, "row": row_index, "cell": cell_index},
+                    )
+            elif template_cell != actual_cell:
+                raise ReportError(
+                    "REPORT_STRUCTURE_INVALID",
+                    "表格固定内容不正确",
+                    {
+                        "position": position,
+                        "row": row_index,
+                        "cell": cell_index,
+                        "expected": template_cell,
+                        "actual": actual_cell,
+                    },
+                )
+
+
+def compare_structure(actual: ET.Element, template_root: ET.Element, template: str, schema: dict[str, Any]) -> None:
     expected = structure_signature(template_root)
     received = structure_signature(actual)
     expected_counts = schema["structure"]
@@ -194,6 +245,7 @@ def compare_structure(actual: ET.Element, template_root: ET.Element, schema: dic
     if len(received) != len(expected):
         raise ReportError("REPORT_STRUCTURE_INVALID", "章节与表格序列长度不正确")
 
+    table_flags = iter(dynamic_table_flags(template))
     for index, ((expected_kind, expected_value), (actual_kind, actual_value)) in enumerate(zip(expected, received)):
         if expected_kind != actual_kind:
             raise ReportError("REPORT_STRUCTURE_INVALID", "章节与表格顺序不正确", {"position": index})
@@ -205,19 +257,7 @@ def compare_structure(actual: ET.Element, template_root: ET.Element, schema: dic
                     {"position": index, "expected": expected_value, "actual": actual_value},
                 )
             continue
-        if len(expected_value) != len(actual_value):
-            raise ReportError("REPORT_STRUCTURE_INVALID", "表格列数不正确", {"position": index})
-        for cell_index, (template_cell, actual_cell) in enumerate(zip(expected_value, actual_value)):
-            static_text, has_marker = template_cell_pattern(template_cell)
-            if has_marker:
-                if static_text and static_text not in actual_cell:
-                    raise ReportError("REPORT_STRUCTURE_INVALID", "表格固定标签不正确", {"position": index, "cell": cell_index})
-            elif template_cell != actual_cell:
-                raise ReportError(
-                    "REPORT_STRUCTURE_INVALID",
-                    "表格固定表头不正确",
-                    {"position": index, "cell": cell_index, "expected": template_cell, "actual": actual_cell},
-                )
+        compare_table(expected_value, actual_value, next(table_flags), index)
 
 
 def fact_values(facts: dict[str, Any], schema: dict[str, Any]) -> Iterable[str]:
@@ -246,7 +286,7 @@ def validate_report(source: str, template: str, schema: dict[str, Any], facts: d
         raise ReportError("TEMPLATE_MARKER_REMAINS", "报告仍有模板标记")
     actual = parse_fragment(source)
     template_root = parse_fragment(template)
-    compare_structure(actual, template_root, schema)
+    compare_structure(actual, template_root, template, schema)
 
     full_text = element_text(actual)
     template_text = element_text(template_root)
