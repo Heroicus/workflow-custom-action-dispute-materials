@@ -1,6 +1,6 @@
 {
   "name": "案件材料处理自动化",
-  "component": "5.3.2-uploader-targeted-permission",
+  "component": "5.4.0-v5-simple-report",
   "common_action": {
     "component_block_type_id": "blk_6a7e783b4b408cb2ed5d02ca",
     "form_mapping": {
@@ -32,7 +32,7 @@
   ],
   "rules": [
     "自动化不修改 AI处理状态、AI分析结果、执行日志或材料处理基线。",
-    "补充材料必须调用同一案件记录，不新增第二条案件记录。",
+    "补充材料必须调用同一案件记录，不新增第二条案件记录或第二份报告。",
     "不得监听 Agent 会写回的字段。"
   ]
 }

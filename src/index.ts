@@ -6,19 +6,17 @@ import {
 import {
   BASELINE_FIELD_NAME,
   buildAnalysisPrompt,
-  REPORT_CONTRACT_VERSION,
   DispatchMode,
   PRODUCTION_APP_TOKEN,
-  TEMPLATE_DOCUMENT_TOKEN,
   PRODUCTION_FIELD_CONTRACT,
   PRODUCTION_TABLE_ID,
 } from "./analysis";
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "5.3.2-uploader-targeted-permission";
+const BUILD_ID = "5.4.0-v5-simple-report";
 const REQUEST_TIMEOUT_MS = 10_000;
-const RUNNING_TTL_MS = 30 * 60 * 1000;
+const RUNNING_TTL_MS = 20 * 60 * 1000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
 
 const FIELD_CASE_NUMBER = PRODUCTION_FIELD_CONTRACT.case_number.name;
@@ -27,6 +25,7 @@ const FIELD_UPLOADER = PRODUCTION_FIELD_CONTRACT.uploader.name;
 const FIELD_PROCESSING_STATUS = PRODUCTION_FIELD_CONTRACT.processing_status.name;
 const FIELD_ANALYSIS_RESULT = PRODUCTION_FIELD_CONTRACT.analysis_result.name;
 const FIELD_EXECUTION_LOG = PRODUCTION_FIELD_CONTRACT.execution_log.name;
+const FIELD_MATERIAL_BASELINE = PRODUCTION_FIELD_CONTRACT.material_baseline.name;
 
 basekit.addDomainList(["open.feishu.cn"]);
 
@@ -38,7 +37,7 @@ type Target = {
   logId: string;
 };
 
-type DispatchState = "accepted" | "already_running" | "already_current" | "review_required" | "failed" | "unknown" | "rejected";
+type DispatchState = "accepted" | "already_running" | "already_current" | "failed" | "unknown" | "rejected";
 
 type DispatchResult = {
   accepted: boolean;
@@ -54,24 +53,15 @@ type DispatchResult = {
   logId: string;
 };
 
-type AttachmentBaseline = {
-  attachment_id: string;
-  size?: number;
-};
-
 type MaterialBaseline = {
-  version: 3;
-  document_token: string;
-  template_document_token: string;
-  report_contract_version: string;
-  processed_attachments: AttachmentBaseline[];
+  documentToken: string;
+  processedAttachmentIds: string[];
 };
 
 type MaterialDecision =
-  | { kind: "initial"; newAttachmentIds: string[] }
-  | { kind: "supplement"; newAttachmentIds: string[] }
-  | { kind: "no_op"; newAttachmentIds: string[] }
-  | { kind: "reconcile"; newAttachmentIds: string[] };
+  | { kind: "initial"; attachmentIds: string[]; newAttachmentIds: string[]; caseNumber: string; uploaderOpenIds: string[] }
+  | { kind: "supplement"; attachmentIds: string[]; newAttachmentIds: string[]; caseNumber: string; uploaderOpenIds: string[]; documentToken: string; reportUrl: string }
+  | { kind: "no_op"; attachmentIds: string[]; newAttachmentIds: string[]; caseNumber: string; uploaderOpenIds: string[] };
 
 class DispatchFailure extends Error {
   readonly code: string;
@@ -272,10 +262,6 @@ function attachmentIds(value: unknown): string[] {
   return [...new Set(value.map(attachmentId).filter(Boolean))].sort();
 }
 
-function uploaderCount(value: unknown): number {
-  return Array.isArray(value) ? value.filter((item) => Boolean(scalarText(item))).length : 0;
-}
-
 function uploaderOpenIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const ids = value.flatMap((item) => {
@@ -289,8 +275,17 @@ function uploaderOpenIds(value: unknown): string[] {
   return [...new Set(ids)].sort();
 }
 
+function isDocumentToken(value: string): boolean {
+  return /^[A-Za-z0-9_-]{8,128}$/.test(value);
+}
+
 function isHttpsDocxUrl(value: string): boolean {
   return /^https:\/\/[^/]+\/docx\/[A-Za-z0-9_-]+$/.test(value);
+}
+
+function tokenFromDocxUrl(value: string): string {
+  const match = value.match(/\/docx\/([A-Za-z0-9_-]+)$/);
+  return match ? match[1] : "";
 }
 
 function parseBaseline(value: unknown): MaterialBaseline | undefined {
@@ -298,64 +293,76 @@ function parseBaseline(value: unknown): MaterialBaseline | undefined {
   if (!text) return undefined;
   try {
     const parsed = JSON.parse(text);
-    if (
-      !isRecord(parsed)
-      || parsed.version !== 3
-      || typeof parsed.document_token !== "string"
-      || parsed.template_document_token !== TEMPLATE_DOCUMENT_TOKEN
-      || parsed.report_contract_version !== REPORT_CONTRACT_VERSION
-    ) return undefined;
-    if (!Array.isArray(parsed.processed_attachments)) return undefined;
-    const attachments = parsed.processed_attachments
-      .filter(isRecord)
-      .map((item) => ({ attachment_id: scalarText(item.attachment_id), ...(Number.isFinite(Number(item.size)) ? { size: Number(item.size) } : {}) }))
-      .filter((item) => item.attachment_id);
-    return {
-      version: 3,
-      document_token: parsed.document_token,
-      template_document_token: TEMPLATE_DOCUMENT_TOKEN,
-      report_contract_version: REPORT_CONTRACT_VERSION,
-      processed_attachments: attachments,
-    };
+    if (!isRecord(parsed)) return undefined;
+    const documentToken = scalarText(parsed.document_token);
+    if (!isDocumentToken(documentToken)) return undefined;
+    const rawIds = Array.isArray(parsed.processed_attachment_ids)
+      ? parsed.processed_attachment_ids.map(scalarText)
+      : Array.isArray(parsed.processed_attachments)
+        ? parsed.processed_attachments.map((item: unknown) => isRecord(item) ? scalarText(item.attachment_id) : "")
+        : [];
+    const processedAttachmentIds = [...new Set(rawIds.filter(Boolean))].sort();
+    if (!processedAttachmentIds.length) return undefined;
+    return { documentToken, processedAttachmentIds };
   } catch {
     return undefined;
   }
 }
 
 function decideMaterials(fields: UnknownRecord): MaterialDecision {
-  const currentIds = attachmentIds(fieldValue(fields, FIELD_ATTACHMENTS));
-  if (!currentIds.length) throw new DispatchFailure("ATTACHMENTS_MISSING", "inspect-materials", "案件文档为空");
-  if (!uploaderCount(fieldValue(fields, FIELD_UPLOADER))) {
-    throw new DispatchFailure("UPLOADER_MISSING", "inspect-materials", "上传人为空");
+  const attachmentIdList = attachmentIds(fieldValue(fields, FIELD_ATTACHMENTS));
+  if (!attachmentIdList.length) throw new DispatchFailure("ATTACHMENTS_MISSING", "inspect-materials", "案件文档为空");
+  const uploaderIdList = uploaderOpenIds(fieldValue(fields, FIELD_UPLOADER));
+  if (!uploaderIdList.length) {
+    throw new DispatchFailure("UPLOADER_OPEN_ID_MISSING", "inspect-materials", "上传人缺少可授权的 open_id");
   }
-  if (!scalarText(fieldValue(fields, FIELD_CASE_NUMBER))) {
-    throw new DispatchFailure("CASE_NUMBER_MISSING", "inspect-materials", "案件编号为空");
-  }
+  const caseNumber = scalarText(fieldValue(fields, FIELD_CASE_NUMBER));
+  if (!caseNumber) throw new DispatchFailure("CASE_NUMBER_MISSING", "inspect-materials", "案件编号为空");
 
-  const resultUrl = scalarText(fieldValue(fields, FIELD_ANALYSIS_RESULT));
-  const baselineRaw = scalarText(fieldValue(fields, BASELINE_FIELD_NAME));
-  const baseline = parseBaseline(baselineRaw);
-  if (!baseline) {
-    return { kind: "initial", newAttachmentIds: currentIds };
+  const reportUrl = scalarText(fieldValue(fields, FIELD_ANALYSIS_RESULT));
+  const baseline = parseBaseline(fieldValue(fields, BASELINE_FIELD_NAME));
+  if (!baseline && !isHttpsDocxUrl(reportUrl)) {
+    return {
+      kind: "initial",
+      attachmentIds: attachmentIdList,
+      newAttachmentIds: attachmentIdList,
+      caseNumber,
+      uploaderOpenIds: uploaderIdList,
+    };
   }
-  if (!isHttpsDocxUrl(resultUrl) || !resultUrl.includes(`/${baseline.document_token}`)) {
-    return { kind: "reconcile", newAttachmentIds: [] };
+  if (!baseline || !isHttpsDocxUrl(reportUrl) || tokenFromDocxUrl(reportUrl) !== baseline.documentToken) {
+    throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前报告链接与材料处理基线不一致");
   }
-  const previousIds = new Set(baseline.processed_attachments.map((item) => item.attachment_id));
-  const currentSet = new Set(currentIds);
-  if ([...previousIds].some((id) => !currentSet.has(id))) {
-    return { kind: "reconcile", newAttachmentIds: [] };
+  const currentSet = new Set(attachmentIdList);
+  if (baseline.processedAttachmentIds.some((id) => !currentSet.has(id))) {
+    throw new DispatchFailure("ATTACHMENT_SET_CHANGED", "inspect-materials", "已有附件被删除或替换");
   }
-  const newAttachmentIds = currentIds.filter((id) => !previousIds.has(id));
-  return newAttachmentIds.length
-    ? { kind: "supplement", newAttachmentIds }
-    : { kind: "no_op", newAttachmentIds: [] };
+  const processed = new Set(baseline.processedAttachmentIds);
+  const newAttachmentIds = attachmentIdList.filter((id) => !processed.has(id));
+  if (!newAttachmentIds.length) {
+    return {
+      kind: "no_op",
+      attachmentIds: attachmentIdList,
+      newAttachmentIds: [],
+      caseNumber,
+      uploaderOpenIds: uploaderIdList,
+    };
+  }
+  return {
+    kind: "supplement",
+    attachmentIds: attachmentIdList,
+    newAttachmentIds,
+    caseNumber,
+    uploaderOpenIds: uploaderIdList,
+    documentToken: baseline.documentToken,
+    reportUrl,
+  };
 }
 
 function makeDispatchId(recordId: string): string {
   const stamp = Date.now();
   const nonce = Math.random().toString(36).slice(2, 8);
-  return `odm-v3:${recordId}:${stamp}:${nonce}`;
+  return `odm-v5:${recordId}:${stamp}:${nonce}`;
 }
 
 function taskLog(dispatchId: string, message: string): string {
@@ -363,10 +370,14 @@ function taskLog(dispatchId: string, message: string): string {
 }
 
 function dispatchStartedAt(log: string): number | undefined {
-  const match = log.match(/任务\s+odm-v3:[A-Za-z0-9_-]+:([0-9]{13}):[A-Za-z0-9]+：/);
-  if (!match) return undefined;
-  const value = Number(match[1]);
+  const match = log.match(/任务\s+odm-v\d+:[A-Za-z0-9_-]+:([0-9]{13}):[A-Za-z0-9]+：/);
+  const value = match ? Number(match[1]) : NaN;
   return Number.isFinite(value) ? value : undefined;
+}
+
+function dispatchIdFromLog(log: string): string {
+  const match = log.match(/任务\s+(odm-v\d+:[A-Za-z0-9_-]+:[0-9]{13}:[A-Za-z0-9]+)：/);
+  return match ? match[1] : "";
 }
 
 function schemaName(field: UnknownRecord): string {
@@ -377,18 +388,36 @@ function schemaId(field: UnknownRecord): string {
   return scalarText(field.field_id || field.fieldId || field.id);
 }
 
+function schemaType(field: UnknownRecord): string {
+  return scalarText(field.type || field.field_type || field.fieldType);
+}
+
+const FIELD_TYPE_ALIASES: Record<string, string[]> = {
+  text: ["text", "1"],
+  select: ["select", "3"],
+  datetime: ["datetime", "5"],
+  user: ["user", "11"],
+  attachment: ["attachment", "17"],
+  auto_number: ["auto_number", "1005"],
+};
+
 function validateSchema(fields: UnknownRecord[]): void {
   const byName = new Map(fields.map((field) => [schemaName(field), field]));
-  for (const field of Object.values(PRODUCTION_FIELD_CONTRACT)) {
-    const actual = byName.get(field.name);
-    if (!actual) throw new DispatchFailure("FIELD_CONTRACT_MISMATCH", "validate-schema", `缺少字段：${field.name}`);
-    if (field.id !== "dynamic" && schemaId(actual) !== field.id) {
-      throw new DispatchFailure("FIELD_CONTRACT_MISMATCH", "validate-schema", `字段 ID 不匹配：${field.name}`);
+  for (const contract of Object.values(PRODUCTION_FIELD_CONTRACT)) {
+    const actual = byName.get(contract.name);
+    if (!actual) throw new DispatchFailure("FIELD_CONTRACT_MISMATCH", "validate-schema", `缺少字段：${contract.name}`);
+    if (schemaId(actual) !== contract.id) {
+      throw new DispatchFailure("FIELD_CONTRACT_MISMATCH", "validate-schema", `字段 ID 不匹配：${contract.name}`);
+    }
+    const actualType = schemaType(actual);
+    const allowedTypes = FIELD_TYPE_ALIASES[contract.type] || [contract.type];
+    if (actualType && !allowedTypes.includes(actualType)) {
+      throw new DispatchFailure("FIELD_CONTRACT_MISMATCH", "validate-schema", `字段类型不匹配：${contract.name}`);
     }
   }
 }
 
-async function writeAndReadProcessing(
+async function writeProcessing(
   context: RuntimeContext,
   token: string,
   target: Target,
@@ -398,7 +427,10 @@ async function writeAndReadProcessing(
   await updateRecord(context, token, target, {
     [FIELD_PROCESSING_STATUS]: "分析中",
     [FIELD_EXECUTION_LOG]: taskLog(dispatchId, "处理中"),
-    ...(mode === "initial" ? { [FIELD_ANALYSIS_RESULT]: "" } : {}),
+    ...(mode === "initial" ? {
+      [FIELD_ANALYSIS_RESULT]: "",
+      [FIELD_MATERIAL_BASELINE]: "",
+    } : {}),
   }, "mark-processing");
   const readback = await getRecord(context, token, target);
   if (scalarText(fieldValue(readback, FIELD_PROCESSING_STATUS)) !== "分析中") {
@@ -407,6 +439,27 @@ async function writeAndReadProcessing(
   if (!scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)).includes(dispatchId)) {
     throw new DispatchFailure("BASE_READBACK_FAILED", "mark-processing", "任务标识读回不一致");
   }
+}
+
+async function markFailure(
+  context: RuntimeContext,
+  token: string,
+  target: Target,
+  dispatchId: string,
+  code: string,
+  clearReport = false,
+): Promise<boolean> {
+  await updateRecord(context, token, target, {
+    [FIELD_PROCESSING_STATUS]: "分析失败",
+    [FIELD_EXECUTION_LOG]: taskLog(dispatchId, `失败：${code}`),
+    ...(clearReport ? {
+      [FIELD_ANALYSIS_RESULT]: "",
+      [FIELD_MATERIAL_BASELINE]: "",
+    } : {}),
+  }, "mark-failure");
+  const readback = await getRecord(context, token, target);
+  return scalarText(fieldValue(readback, FIELD_PROCESSING_STATUS)) === "分析失败"
+    && scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)).includes(code);
 }
 
 async function currentAttemptOwnsRecord(
@@ -426,47 +479,10 @@ async function writeFailureIfOwned(
   target: Target,
   dispatchId: string,
   code: string,
+  clearReport: boolean,
 ): Promise<boolean> {
   if (!(await currentAttemptOwnsRecord(context, token, target, dispatchId))) return false;
-  await updateRecord(context, token, target, {
-    [FIELD_PROCESSING_STATUS]: "分析失败",
-    [FIELD_EXECUTION_LOG]: taskLog(dispatchId, `失败：${code}`),
-  }, "mark-dispatch-failure");
-  const readback = await getRecord(context, token, target);
-  return scalarText(fieldValue(readback, FIELD_PROCESSING_STATUS)) === "分析失败"
-    && scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)).includes(code);
-}
-
-async function writeReview(
-  context: RuntimeContext,
-  token: string,
-  target: Target,
-  message: string,
-): Promise<void> {
-  await updateRecord(context, token, target, {
-    [FIELD_PROCESSING_STATUS]: "待法务审核",
-    [FIELD_EXECUTION_LOG]: message,
-  }, "mark-review-required");
-  const readback = await getRecord(context, token, target);
-  if (scalarText(fieldValue(readback, FIELD_PROCESSING_STATUS)) !== "待法务审核") {
-    throw new DispatchFailure("BASE_READBACK_FAILED", "mark-review-required", "待法务审核状态读回不一致");
-  }
-}
-
-async function writePreflightFailure(
-  context: RuntimeContext,
-  token: string,
-  target: Target,
-  dispatchId: string,
-  code: string,
-): Promise<boolean> {
-  await updateRecord(context, token, target, {
-    [FIELD_PROCESSING_STATUS]: "分析失败",
-    [FIELD_EXECUTION_LOG]: taskLog(dispatchId, `失败：${code}`),
-  }, "mark-preflight-failure");
-  const readback = await getRecord(context, token, target);
-  return scalarText(fieldValue(readback, FIELD_PROCESSING_STATUS)) === "分析失败"
-    && scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)).includes(code);
+  return markFailure(context, token, target, dispatchId, code, clearReport);
 }
 
 function extractChatId(data: unknown): string {
@@ -497,7 +513,7 @@ async function createAgentChat(
   return chatId;
 }
 
-function resultBase(target?: Partial<Target>): Omit<DispatchResult, "accepted" | "dispatchState" | "stage" | "errorCode" | "errorMessage" | "agentChatId" | "dispatchId" | "mode"> {
+function resultBase(target?: Partial<Target>) {
   return {
     targetRecordId: target?.recordId || "",
     buildId: BUILD_ID,
@@ -514,7 +530,7 @@ function result(
 }
 
 basekit.addAction({
-  description: "锁定目标案件记录，写入分析中并向纠纷材料整理智能体投递一次任务。",
+  description: "读取当前案件附件，投递固定模板填充任务，并由智能体回写报告链接。",
   actionText: "提交案件材料分析任务",
   permission: { type: 2 },
   useTenantAccessToken: true,
@@ -548,12 +564,13 @@ basekit.addAction({
     let target: Target | undefined;
     let token = "";
     let dispatchId = "";
+    let mode: DispatchMode | "" = "";
     try {
       validateRuntimeApp(context);
       target = { recordId: targetRecordId(formItemParams), logId: runtimeLogId(context) };
       token = tenantToken(context);
       validateSchema(await getTableFields(context, token));
-      const fields = await getRecord(context, token, target);
+      let fields = await getRecord(context, token, target);
       const status = scalarText(fieldValue(fields, FIELD_PROCESSING_STATUS));
       const currentLog = scalarText(fieldValue(fields, FIELD_EXECUTION_LOG));
       if (status === "分析中") {
@@ -569,21 +586,21 @@ basekit.addAction({
             mode: "",
           });
         }
+        const staleDispatchId = dispatchIdFromLog(currentLog) || makeDispatchId(target.recordId);
+        await markFailure(context, token, target, staleDispatchId, "AGENT_TIMEOUT", false);
+        fields = await getRecord(context, token, target);
       }
+
       let decision: MaterialDecision;
-      let currentUploaderOpenIds: string[];
       try {
         decision = decideMaterials(fields);
-        currentUploaderOpenIds = uploaderOpenIds(fieldValue(fields, FIELD_UPLOADER));
-        if (!currentUploaderOpenIds.length) {
-          throw new DispatchFailure("UPLOADER_OPEN_ID_MISSING", "inspect-materials", "上传人缺少可授权的 open_id");
-        }
       } catch (error) {
         const failure = error instanceof DispatchFailure
           ? error
           : new DispatchFailure("MATERIAL_PREFLIGHT_FAILED", "inspect-materials", safeMessage(error));
         dispatchId = makeDispatchId(target.recordId);
-        const written = await writePreflightFailure(context, token, target, dispatchId, failure.code);
+        const hasValidReport = isHttpsDocxUrl(scalarText(fieldValue(fields, FIELD_ANALYSIS_RESULT)));
+        const written = await markFailure(context, token, target, dispatchId, failure.code, !hasValidReport);
         return result(target, dispatchId, {
           accepted: false,
           dispatchState: "failed",
@@ -606,27 +623,20 @@ basekit.addAction({
           mode: "no_op",
         });
       }
-      if (decision.kind === "reconcile") {
-        await writeReview(context, token, target, "材料发生替换、删除或基线异常，需要确认是否全文重整");
-        return result(target, "", {
-          accepted: false,
-          dispatchState: "review_required",
-          stage: "inspect-materials",
-          errorCode: "MATERIAL_BASELINE_RECONCILE_REQUIRED",
-          errorMessage: "材料基线与当前附件不一致",
-          agentChatId: "",
-          mode: "reconcile",
-        });
-      }
 
+      mode = decision.kind;
       dispatchId = makeDispatchId(target.recordId);
-      await writeAndReadProcessing(context, token, target, dispatchId, decision.kind as DispatchMode);
+      await writeProcessing(context, token, target, dispatchId, mode);
       const prompt = buildAnalysisPrompt({
         targetRecordId: target.recordId,
         dispatchId,
-        mode: decision.kind as DispatchMode,
+        mode,
+        caseNumber: decision.caseNumber,
+        attachmentIds: decision.attachmentIds,
         newAttachmentIds: decision.newAttachmentIds,
-        uploaderOpenIds: currentUploaderOpenIds,
+        uploaderOpenIds: decision.uploaderOpenIds,
+        existingDocumentToken: decision.kind === "supplement" ? decision.documentToken : "",
+        existingReportUrl: decision.kind === "supplement" ? decision.reportUrl : "",
         componentBuild: BUILD_ID,
       });
 
@@ -639,14 +649,14 @@ basekit.addAction({
           errorCode: "",
           errorMessage: "",
           agentChatId: chatId,
-          mode: decision.kind,
+          mode,
         });
       } catch (error) {
         const failure = error instanceof DispatchFailure
           ? error
           : new DispatchFailure("AILY_CHAT_UNKNOWN", "create-agent-chat", safeMessage(error), false);
         if (failure.definitive) {
-          const written = await writeFailureIfOwned(context, token, target, dispatchId, failure.code);
+          const written = await writeFailureIfOwned(context, token, target, dispatchId, failure.code, mode === "initial");
           return result(target, dispatchId, {
             accepted: false,
             dispatchState: "failed",
@@ -654,7 +664,7 @@ basekit.addAction({
             errorCode: written ? failure.code : "BASE_STATE_CONFLICT",
             errorMessage: written ? safeMessage(failure) : "任务状态已被其他运行接管",
             agentChatId: "",
-            mode: decision.kind,
+            mode,
           });
         }
         return result(target, dispatchId, {
@@ -664,7 +674,7 @@ basekit.addAction({
           errorCode: failure.code,
           errorMessage: safeMessage(failure),
           agentChatId: "",
-          mode: decision.kind,
+          mode,
         });
       }
     } catch (error) {
@@ -673,7 +683,7 @@ basekit.addAction({
         : new DispatchFailure("COMPONENT_INTERNAL_ERROR", "dispatch", safeMessage(error));
       if (target && token && failure.definitive && dispatchId) {
         try {
-          await writeFailureIfOwned(context, token, target, dispatchId, failure.code);
+          await writeFailureIfOwned(context, token, target, dispatchId, failure.code, mode === "initial");
         } catch {}
       }
       return result(target, dispatchId, {
@@ -683,7 +693,7 @@ basekit.addAction({
         errorCode: failure.code,
         errorMessage: safeMessage(failure),
         agentChatId: "",
-        mode: "",
+        mode,
       });
     }
   },

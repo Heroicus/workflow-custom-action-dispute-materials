@@ -1,7 +1,6 @@
-export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v3";
+export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v5";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "5.3.2";
-export const REPORT_CONTRACT_VERSION = "dispute-report/5.3.2";
+export const REQUIRED_SKILL_VERSION = "5.4.0";
 export const TEMPLATE_DOCUMENT_TOKEN = "Kk2edGa13oOrh8xuyM5ced3Gnhh";
 export const TEMPLATE_DOCUMENT_URL = "https://aixuexi.feishu.cn/docx/Kk2edGa13oOrh8xuyM5ced3Gnhh";
 
@@ -10,22 +9,23 @@ export const PRODUCTION_TABLE_ID = "tbllz7nrxSIH8frX";
 export const BASELINE_FIELD_NAME = "材料处理基线";
 
 export const PRODUCTION_FIELD_CONTRACT = {
-  case_number: { id: "fldnDqIuar", name: "案件编号", access: "read_only" },
-  case_name: { id: "fldZ1S4MD3", name: "案件名称", access: "read_write" },
-  case_type: { id: "fldZCjfhMY", name: "案件类型", access: "read_write", options: ["诉讼", "仲裁"] },
-  filing_date: { id: "fld9zzBKtm", name: "立案（收案）日期", access: "read_write" },
-  case_status: { id: "fldRlZJrNA", name: "案件状态", access: "read_write", options: ["待立案", "审理中", "已结案", "已归档"] },
-  attachments: { id: "fldOz2CYX4", name: "案件文档", access: "read_only" },
-  uploader: { id: "fldpXEeboF", name: "上传人", access: "read_only" },
+  case_number: { id: "fldnDqIuar", name: "案件编号", type: "auto_number", access: "read_only" },
+  case_name: { id: "fldZ1S4MD3", name: "案件名称", type: "text", access: "read_write" },
+  case_type: { id: "fldZCjfhMY", name: "案件类型", type: "select", access: "read_write", options: ["诉讼", "仲裁"] },
+  filing_date: { id: "fld9zzBKtm", name: "立案（收案）日期", type: "datetime", access: "read_write" },
+  case_status: { id: "fldRlZJrNA", name: "案件状态", type: "select", access: "read_write", options: ["待立案", "审理中", "已结案", "已归档"] },
+  attachments: { id: "fldOz2CYX4", name: "案件文档", type: "attachment", access: "read_only" },
+  uploader: { id: "fldpXEeboF", name: "上传人", type: "user", access: "read_only" },
   processing_status: {
     id: "fldHeuCxLE",
     name: "AI处理状态",
+    type: "select",
     access: "read_write",
-    options: ["待处理", "分析中", "待法务审核", "已完成", "分析失败"],
+    options: ["待处理", "分析中", "已完成", "分析失败"],
   },
-  analysis_result: { id: "fldDH6CfUI", name: "AI分析结果", access: "read_write" },
-  execution_log: { id: "fldeBcCdyM", name: "执行日志/失败原因", access: "read_write" },
-  material_baseline: { id: "dynamic", name: BASELINE_FIELD_NAME, access: "read_write" },
+  analysis_result: { id: "fldDH6CfUI", name: "AI分析结果", type: "text", access: "read_write" },
+  execution_log: { id: "fldeBcCdyM", name: "执行日志/失败原因", type: "text", access: "read_write" },
+  material_baseline: { id: "fldeOvHTNp", name: BASELINE_FIELD_NAME, type: "text", access: "read_write" },
 } as const;
 
 export type DispatchMode = "initial" | "supplement";
@@ -34,8 +34,12 @@ export type AnalysisPromptInput = {
   targetRecordId: string;
   dispatchId: string;
   mode: DispatchMode;
+  caseNumber: string;
+  attachmentIds: string[];
   newAttachmentIds: string[];
   uploaderOpenIds: string[];
+  existingDocumentToken?: string;
+  existingReportUrl?: string;
   componentBuild: string;
 };
 
@@ -43,6 +47,10 @@ function requiredText(value: unknown, label: string): string {
   const text = String(value || "").trim();
   if (!text) throw new Error(`${label}为空`);
   return text;
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
 }
 
 export function buildAnalysisPrompt(input: AnalysisPromptInput): string {
@@ -54,11 +62,14 @@ export function buildAnalysisPrompt(input: AnalysisPromptInput): string {
     record_id: requiredText(input.targetRecordId, "targetRecordId"),
     dispatch_id: requiredText(input.dispatchId, "dispatchId"),
     mode: input.mode,
-    new_attachment_ids: [...new Set(input.newAttachmentIds)].sort(),
-    uploader_open_ids: [...new Set(input.uploaderOpenIds)].sort(),
+    case_number: requiredText(input.caseNumber, "caseNumber"),
+    attachment_ids: unique(input.attachmentIds),
+    new_attachment_ids: unique(input.newAttachmentIds),
+    uploader_open_ids: unique(input.uploaderOpenIds),
+    existing_document_token: input.existingDocumentToken || "",
+    existing_report_url: input.existingReportUrl || "",
     component_build: requiredText(input.componentBuild, "componentBuild"),
     required_skill_version: REQUIRED_SKILL_VERSION,
-    report_contract_version: REPORT_CONTRACT_VERSION,
     baseline_field_name: BASELINE_FIELD_NAME,
     template_document_token: TEMPLATE_DOCUMENT_TOKEN,
     template_document_url: TEMPLATE_DOCUMENT_URL,
