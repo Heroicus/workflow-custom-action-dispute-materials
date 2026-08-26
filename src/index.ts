@@ -10,11 +10,12 @@ import {
   PRODUCTION_APP_TOKEN,
   PRODUCTION_FIELD_CONTRACT,
   PRODUCTION_TABLE_ID,
+  REQUIRED_SKILL_VERSION,
 } from "./analysis";
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.1.0-fail-closed-renderer";
+const BUILD_ID = "6.1.1-upgrade-aware-renderer";
 const REQUEST_TIMEOUT_MS = 10_000;
 const RUNNING_TTL_MS = 20 * 60 * 1000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
@@ -56,6 +57,7 @@ type DispatchResult = {
 type MaterialBaseline = {
   documentToken: string;
   processedAttachmentIds: string[];
+  contractVersion: string;
 };
 
 type MaterialDecision =
@@ -303,7 +305,8 @@ function parseBaseline(value: unknown): MaterialBaseline | undefined {
         : [];
     const processedAttachmentIds = [...new Set(rawIds.filter(Boolean))].sort();
     if (!processedAttachmentIds.length) return undefined;
-    return { documentToken, processedAttachmentIds };
+    const contractVersion = scalarText(parsed.contract_version);
+    return { documentToken, processedAttachmentIds, contractVersion };
   } catch {
     return undefined;
   }
@@ -336,6 +339,17 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
   const currentSet = new Set(attachmentIdList);
   if (baseline.processedAttachmentIds.some((id) => !currentSet.has(id))) {
     throw new DispatchFailure("ATTACHMENT_SET_CHANGED", "inspect-materials", "已有附件被删除或替换");
+  }
+  if (baseline.contractVersion !== REQUIRED_SKILL_VERSION) {
+    return {
+      kind: "supplement",
+      attachmentIds: attachmentIdList,
+      newAttachmentIds: attachmentIdList,
+      caseNumber,
+      uploaderOpenIds: uploaderIdList,
+      documentToken: baseline.documentToken,
+      reportUrl,
+    };
   }
   const processed = new Set(baseline.processedAttachmentIds);
   const newAttachmentIds = attachmentIdList.filter((id) => !processed.has(id));

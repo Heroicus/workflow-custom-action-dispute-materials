@@ -150,7 +150,7 @@ lark-cli drive +member-list --as user \
 
 ```text
 AI分析结果 = 报告 URL
-材料处理基线 = {"document_token":"...","processed_attachment_ids":[...]}
+材料处理基线 = {"document_token":"...","processed_attachment_ids":[...],"contract_version":"6.1.0"}
 AI处理状态 = 已完成
 执行日志/失败原因 = 任务 <dispatch_id>：已完成
 ```

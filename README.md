@@ -1,6 +1,6 @@
 # 纠纷材料整理工作流组件
 
-当前发布版本：`6.1.0`
+当前发布版本：小组件 `6.1.1` / Skill `6.1.0`
 文档架构：固定 XML + 可执行渲染器 + 远端失败闭环
 
 ```text
@@ -22,11 +22,12 @@
 ```json
 {
   "document_token": "报告 token",
-  "processed_attachment_ids": ["已处理附件 ID"]
+  "processed_attachment_ids": ["已处理附件 ID"],
+  "contract_version": "6.1.0"
 }
 ```
 
-它只用于识别同案新增附件，不承担报告质量、覆盖率或审核逻辑。
+它用于识别同案新增附件和旧合同迁移，不承担报告质量、覆盖率或审核逻辑。旧基线没有 `contract_version` 时，小组件会保留原报告 URL 并触发一次全量重写。
 
 ## 自动化
 
