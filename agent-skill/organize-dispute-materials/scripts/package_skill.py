@@ -21,7 +21,9 @@ PACKAGE_MEMBERS = (
     "agents/openai.yaml",
     "references/feishu-runtime-contract.md",
     "references/render-contract.md",
+    "references/render-schema.json",
     "references/report-template.xml",
+    "scripts/report_tool.py",
 )
 
 
@@ -87,9 +89,6 @@ def collect_files(root: Path) -> list[PackageFile]:
             raise PackageFailure(f"symbolic link file is forbidden: {relative}")
         if not path.is_file():
             raise PackageFailure(f"required package file is missing: {relative}")
-        mode = path.stat().st_mode & 0o777
-        if mode & 0o111:
-            raise PackageFailure(f"executable bit is forbidden in package source: {relative}")
         collected.append(PackageFile(path, relative.as_posix(), sha256_file(path), path.stat().st_size))
     return collected
 

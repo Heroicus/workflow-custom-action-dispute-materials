@@ -1,13 +1,13 @@
 # 纠纷材料整理工作流组件
 
-当前发布版本：`6.0.0`
-文档架构：Skill 内置固定 XML，一次创建或同 token 全文重写
+当前发布版本：`6.1.0`
+文档架构：固定 XML + 可执行渲染器 + 远端失败闭环
 
 ```text
 多维表格 → 小组件 → 纠纷材料整理智能体 + Skill
 ```
 
-小组件只接收 `targetRecordId`，精确读取同一案件记录，判断首次处理或新增附件补充，写入“分析中”后创建 Agent 会话。Agent 读取附件，使用 Skill 内置固定 XML 一次创建或全文重写报告，为上传人添加访问权限，并把报告链接和明确案件字段写回同一条记录。
+小组件只接收 `targetRecordId`，精确读取同一案件记录，判断首次处理或新增附件补充，写入“分析中”后创建 Agent 会话。Agent 读取附件，先生成结构化事实，再调用 Skill 的确定性渲染器一次创建或全文重写报告。远端文档、上传人权限和 Base 回写均读回通过后才完成。
 
 ## Base 字段
 
@@ -50,6 +50,6 @@ targetRecordId = 第 1 步新增案件记录.Record ID
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v6.0.0.zip --json
-unzip -t output/organize-dispute-materials-v6.0.0.zip
+  --output output/organize-dispute-materials-v6.1.0.zip --json
+unzip -t output/organize-dispute-materials-v6.1.0.zip
 ```

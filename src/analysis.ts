@@ -1,6 +1,6 @@
-export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6";
+export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.1";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.0.0";
+export const REQUIRED_SKILL_VERSION = "6.1.0";
 
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";
 export const PRODUCTION_TABLE_ID = "tbllz7nrxSIH8frX";

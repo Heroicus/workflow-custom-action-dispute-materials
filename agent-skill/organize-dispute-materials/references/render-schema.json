@@ -1,0 +1,45 @@
+{
+  "schema_version": "6.1.0",
+  "template": "report-template.xml",
+  "required_scalars": [
+    "case_number"
+  ],
+  "structure": {
+    "h1_count": 15,
+    "h2_count": 22,
+    "table_count": 34
+  },
+  "forbidden_text": [
+    "显示公平",
+    "未载明",
+    "未提供",
+    "暂无",
+    "不适用",
+    "待确认",
+    "需补充",
+    "人工复核",
+    "人工填写"
+  ],
+  "dynamic_rows": {
+    "request_rows": ["index", "request", "category", "amount", "basis", "evidence"],
+    "counterclaim_rows": ["index", "request", "amount", "basis", "evidence"],
+    "timeline_rows": ["index", "date", "fact", "source", "note"],
+    "fact_dispute_rows": ["index", "disputed_fact", "our_record", "opponent_record", "evidence_comparison", "fact_to_verify"],
+    "focus_rows": ["index", "focus", "type", "importance"],
+    "our_argument_rows": ["index", "focus", "our_record", "basis", "evidence"],
+    "opposition_rows": ["index", "opponent_record", "type", "existing_rebuttal", "existing_support_requirement"],
+    "legal_basis_rows": ["index", "name", "clause", "summary", "elements", "evidence"],
+    "evidence_rows": ["index", "name", "type", "purpose", "original_status", "pages", "date", "existing_note"],
+    "evidence_group_rows": ["group", "name", "evidence_numbers", "purpose"],
+    "opponent_evidence_rows": ["index", "name", "opponent_purpose", "existing_objection", "existing_appraisal_requirement"],
+    "evidence_defect_rows": ["index", "evidence", "explicit_defect", "risk_quote", "support_quote", "owner_deadline"],
+    "calculation_detail_rows": ["index", "period", "base", "daily_rate", "days", "amount"],
+    "procedure_rows": ["date", "event_type", "content", "owner", "attachment_number"],
+    "preservation_rows": ["type", "date", "subject", "security_cost", "result_opinion"],
+    "risk_rows": ["index", "explicit_risk", "type", "likelihood", "level", "explicit_measure"],
+    "precedent_rows": ["index", "case_number", "court", "holding", "applicability"],
+    "todo_rows": ["index", "explicit_todo", "related_section", "owner", "deadline", "status"],
+    "completeness_rows": ["index", "source_check_item", "available", "source_note"],
+    "conflict_rows": ["index", "matter", "source_a", "source_b", "existing_resolution"]
+  }
+}

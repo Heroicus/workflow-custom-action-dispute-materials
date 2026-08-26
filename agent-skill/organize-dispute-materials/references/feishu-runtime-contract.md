@@ -15,7 +15,8 @@ record_id = 运行信封中的 record_id
 ```text
 读取指定附件
 → 形成来源明确的结构化事实
-→ 使用 Skill 内置 XML 模板一次创建或全文重写
+→ report_tool.py 用固定 XML 模板渲染并本地校验
+→ 一次创建或全文重写后进行远端读回校验
 → 为上传人添加报告 full_access
 → 回写同一 Base 记录
 ```
@@ -51,14 +52,14 @@ Docx 协作者 full_access 添加
 Base 精确读写
 ```
 
-初次处理将完整 XML 作为一次创建请求正文。补充处理将完整 XML 作为一次全文重写请求写入原 document token。禁止使用 append、逐表修改或块移动生成正式报告。
+初次处理将 `report_tool.py` 输出的完整 XML 作为一次创建请求正文。补充处理将同一工具输出的完整 XML 作为一次全文重写请求写入原 document token。禁止手写 XML、使用 append、逐表修改或块移动生成正式报告。
 
 ## 成功边界
 
 只有以下事实均已读回确认才算完成：
 
-- 报告使用 Skill 内置 XML 模板渲染且章节、表格顺序正确；
-- 上传人 full_access 授权调用成功；
+- 报告通过 `report_tool.py` 的本地与远端读回校验；
+- 上传人 full_access 已从协作者列表读回；
 - 报告 URL、材料基线和最终状态写回同一 `record_id`。
 
 小组件返回 `accepted` 只表示 Agent 会话创建成功。

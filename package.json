@@ -1,6 +1,6 @@
 {
   "name": "organize-dispute-materials-workflow-shortcut",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "description": "Feishu Base workflow dispatcher that sends one production record-targeted envelope to the dispute-materials agent",
   "main": "index.js",
   "scripts": {
