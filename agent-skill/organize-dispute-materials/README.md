@@ -1,3 +1,3 @@
-# organize-dispute-materials 5.3.1
+# organize-dispute-materials 5.3.2
 
 该 Skill 只处理小组件指定的一条案件记录。首次处理复制飞书原生正式模板，按模板位置填充当前附件事实并完成文档、上传人权限和 Base 读回；同案补充材料只追加到同一份报告。目标 Base 需要隐藏长文本字段：`材料处理基线`。

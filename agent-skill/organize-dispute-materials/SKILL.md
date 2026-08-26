@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 复制正式报告模板，按当前案件材料填充全表并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "5.3.1"
+  version: "5.3.2"
   tier: STANDARD
   category: legal-automation
 ---
@@ -30,9 +30,10 @@ record_id = 运行信封中的 record_id
   "dispatch_id": "odm-v3:rec...:...",
   "mode": "initial | supplement",
   "new_attachment_ids": [],
+  "uploader_open_ids": ["ou_..."],
   "template_document_token": "...",
   "template_document_url": "https://.../docx/...",
-  "required_skill_version": "5.3.1"
+  "required_skill_version": "5.3.2"
 }
 ```
 
@@ -68,7 +69,7 @@ AI分析结果 = 空
 
 ## 交付权限
 
-报告写入并读取成功后，先处理当前记录的每一个上传人。对每个上传人以其 `open_id` 调用飞书 Drive 协作者创建接口：
+报告写入并读取成功后，只处理运行信封 `uploader_open_ids` 中列出的上传人。对每个 `open_id` 调用飞书 Drive 协作者创建接口：
 
 ```text
 resource = 报告 docx token
@@ -77,7 +78,7 @@ member_type = openid
 perm = full_access
 ```
 
-随后读取报告协作者列表，确认每个上传人的 `member_id` 均存在且 `perm=full_access`。创建或读回任一步返回失败，立即执行：
+运行信封缺少或含空的 `uploader_open_ids` 时，立即失败 `UPLOADER_OPEN_ID_MISSING`。随后读取报告协作者列表，确认每个上传人的 `member_id` 均存在且 `perm=full_access`。创建或读回任一步返回失败，立即执行：
 
 ```text
 AI处理状态 = 分析失败
@@ -100,7 +101,7 @@ AI分析结果 = 空
   "version": 3,
   "document_token": "报告 docx token",
   "template_document_token": "运行信封中的模板 token",
-  "report_contract_version": "dispute-report/5.3.1",
+  "report_contract_version": "dispute-report/5.3.2",
   "processed_attachments": [{"attachment_id": "稳定附件标识", "size": 0}]
 }
 ```

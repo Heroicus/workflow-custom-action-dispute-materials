@@ -1,7 +1,7 @@
 export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v3";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "5.3.1";
-export const REPORT_CONTRACT_VERSION = "dispute-report/5.3.1";
+export const REQUIRED_SKILL_VERSION = "5.3.2";
+export const REPORT_CONTRACT_VERSION = "dispute-report/5.3.2";
 export const TEMPLATE_DOCUMENT_TOKEN = "Kk2edGa13oOrh8xuyM5ced3Gnhh";
 export const TEMPLATE_DOCUMENT_URL = "https://aixuexi.feishu.cn/docx/Kk2edGa13oOrh8xuyM5ced3Gnhh";
 
@@ -35,6 +35,7 @@ export type AnalysisPromptInput = {
   dispatchId: string;
   mode: DispatchMode;
   newAttachmentIds: string[];
+  uploaderOpenIds: string[];
   componentBuild: string;
 };
 
@@ -54,6 +55,7 @@ export function buildAnalysisPrompt(input: AnalysisPromptInput): string {
     dispatch_id: requiredText(input.dispatchId, "dispatchId"),
     mode: input.mode,
     new_attachment_ids: [...new Set(input.newAttachmentIds)].sort(),
+    uploader_open_ids: [...new Set(input.uploaderOpenIds)].sort(),
     component_build: requiredText(input.componentBuild, "componentBuild"),
     required_skill_version: REQUIRED_SKILL_VERSION,
     report_contract_version: REPORT_CONTRACT_VERSION,

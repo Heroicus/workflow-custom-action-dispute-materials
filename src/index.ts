@@ -16,7 +16,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "5.3.1-permission-gated-report";
+const BUILD_ID = "5.3.2-uploader-targeted-permission";
 const REQUEST_TIMEOUT_MS = 10_000;
 const RUNNING_TTL_MS = 30 * 60 * 1000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
@@ -274,6 +274,19 @@ function attachmentIds(value: unknown): string[] {
 
 function uploaderCount(value: unknown): number {
   return Array.isArray(value) ? value.filter((item) => Boolean(scalarText(item))).length : 0;
+}
+
+function uploaderOpenIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids = value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    for (const key of ["open_id", "openId", "member_id", "memberId", "id"]) {
+      const id = scalarText(item[key]);
+      if (/^ou_[A-Za-z0-9_-]+$/.test(id)) return [id];
+    }
+    return [];
+  });
+  return [...new Set(ids)].sort();
 }
 
 function isHttpsDocxUrl(value: string): boolean {
@@ -558,8 +571,13 @@ basekit.addAction({
         }
       }
       let decision: MaterialDecision;
+      let currentUploaderOpenIds: string[];
       try {
         decision = decideMaterials(fields);
+        currentUploaderOpenIds = uploaderOpenIds(fieldValue(fields, FIELD_UPLOADER));
+        if (!currentUploaderOpenIds.length) {
+          throw new DispatchFailure("UPLOADER_OPEN_ID_MISSING", "inspect-materials", "上传人缺少可授权的 open_id");
+        }
       } catch (error) {
         const failure = error instanceof DispatchFailure
           ? error
@@ -608,6 +626,7 @@ basekit.addAction({
         dispatchId,
         mode: decision.kind as DispatchMode,
         newAttachmentIds: decision.newAttachmentIds,
+        uploaderOpenIds: currentUploaderOpenIds,
         componentBuild: BUILD_ID,
       });
 

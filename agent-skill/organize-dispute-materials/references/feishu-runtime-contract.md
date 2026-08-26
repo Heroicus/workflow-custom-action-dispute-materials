@@ -10,7 +10,7 @@ table_id  = tbllz7nrxSIH8frX
 record_id = 运行信封中的目标案件记录
 ```
 
-`record_id` 由小组件显式传入。
+`record_id` 与 `uploader_open_ids` 由小组件显式传入。`uploader_open_ids` 只允许包含当前记录上传人的 `ou_...` 标识。
 
 ## 必需能力
 
@@ -66,7 +66,7 @@ AI分析结果
   "version": 3,
   "document_token": "docx token",
   "template_document_token": "运行信封中的模板 token",
-  "report_contract_version": "dispute-report/5.3.1",
+  "report_contract_version": "dispute-report/5.3.2",
   "processed_attachments": [
     {"attachment_id": "稳定附件标识", "size": 0}
   ]

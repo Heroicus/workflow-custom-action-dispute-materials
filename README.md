@@ -1,6 +1,6 @@
 # 纠纷材料整理工作流组件
 
-当前版本：`5.3.1`
+当前版本：`5.3.2`
 
 ```text
 多维表格 → 小组件 → 纠纷材料整理智能体 + Skill
@@ -40,6 +40,6 @@ targetRecordId = 第 1 步新增案件记录.Record ID
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v5.3.1.zip --json
-unzip -t output/organize-dispute-materials-v5.3.1.zip
+  --output output/organize-dispute-materials-v5.3.2.zip --json
+unzip -t output/organize-dispute-materials-v5.3.2.zip
 ```
