@@ -1,6 +1,6 @@
 {
   "name": "案件材料处理自动化",
-  "component": "5.3.0-coverage-mapped-report",
+  "component": "5.3.1-permission-gated-report",
   "common_action": {
     "component_block_type_id": "blk_6a7e783b4b408cb2ed5d02ca",
     "form_mapping": {

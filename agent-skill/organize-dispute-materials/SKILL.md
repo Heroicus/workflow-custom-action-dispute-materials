@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 复制正式报告模板，按当前案件材料填充全表并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "5.3.0"
+  version: "5.3.1"
   tier: STANDARD
   category: legal-automation
 ---
@@ -32,7 +32,7 @@ record_id = 运行信封中的 record_id
   "new_attachment_ids": [],
   "template_document_token": "...",
   "template_document_url": "https://.../docx/...",
-  "required_skill_version": "5.3.0"
+  "required_skill_version": "5.3.1"
 }
 ```
 
@@ -66,26 +66,48 @@ AI分析结果 = 空
 
 只读取 `new_attachment_ids`，只向材料处理基线指定的同一份报告追加“补充材料”，不得创建第二份报告。追加后重新读取该报告并按同一映射核验新增材料对应内容。
 
+## 交付权限
+
+报告写入并读取成功后，先处理当前记录的每一个上传人。对每个上传人以其 `open_id` 调用飞书 Drive 协作者创建接口：
+
+```text
+resource = 报告 docx token
+type = docx
+member_type = openid
+perm = full_access
+```
+
+随后读取报告协作者列表，确认每个上传人的 `member_id` 均存在且 `perm=full_access`。创建或读回任一步返回失败，立即执行：
+
+```text
+AI处理状态 = 分析失败
+AI分析结果 = 空
+执行日志/失败原因 = 任务 <dispatch_id>：失败：DOC_PERMISSION_GRANT_FAILED | DOC_PERMISSION_READBACK_FAILED
+```
+
+未完成上述创建和读回，不得写报告链接、材料处理基线或完成状态。
+
 ## 回写
 
-完成报告后：
+全部上传人权限读回成功后：
 
 1. 读取同一份报告，确认案件编号、附件事实和表格覆盖均已写入；
-2. 为当前记录全部上传人确认 `full_access`；
-3. 首次处理时按明确材料事实回写案件名称、案件类型、立案（收案）日期和案件状态；
-4. 回写单个报告链接和材料处理基线：
+2. 首次处理时按明确材料事实回写案件名称、案件类型、立案（收案）日期和案件状态；
+3. 回写单个报告链接和材料处理基线：
 
 ```json
 {
   "version": 3,
   "document_token": "报告 docx token",
   "template_document_token": "运行信封中的模板 token",
-  "report_contract_version": "dispute-report/5.3.0",
+  "report_contract_version": "dispute-report/5.3.1",
   "processed_attachments": [{"attachment_id": "稳定附件标识", "size": 0}]
 }
 ```
 
-5. 回写最终 `AI处理状态`，再读取同一条 Base 记录确认。
+4. 回写最终 `AI处理状态`，再读取同一条 Base 记录确认。
+
+每次运行只执行以下业务链：精确读取目标 Base 记录、复制模板、读取当前附件、填表、报告读取核验、上传人授权与读回、同记录回写。不要扫描云盘、工作区或其他 Base 记录。
 
 文档、权限、链接、覆盖核验或最终 Base 读回失败时，清空 `AI分析结果`，将同一记录写为 `分析失败`，日志使用：
 

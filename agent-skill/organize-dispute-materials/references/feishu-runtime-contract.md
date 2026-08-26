@@ -20,8 +20,10 @@ record_id = 运行信封中的目标案件记录
 2. 读取当前记录的案件文档附件正文；
 3. 复制运行信封指定的飞书原生 Docx；
 4. 写入并读取复制后的飞书原生 Docx；
-5. 为当前上传人添加并读取 `full_access`；
+5. 为每一个当前上传人创建并读取报告 `full_access` 协作者权限；
 6. 对同一条 Base 记录回写状态、链接、日志和材料处理基线。
+
+仅当上传人 `full_access` 创建和读回均成功时，才允许写入报告链接和终态。运行应用必须具备 `drive:drive`、`docs:permission.member:create` 和 `docs:permission.member:retrieve`。
 
 ## 状态写入
 
@@ -64,7 +66,7 @@ AI分析结果
   "version": 3,
   "document_token": "docx token",
   "template_document_token": "运行信封中的模板 token",
-  "report_contract_version": "dispute-report/5.3.0",
+  "report_contract_version": "dispute-report/5.3.1",
   "processed_attachments": [
     {"attachment_id": "稳定附件标识", "size": 0}
   ]

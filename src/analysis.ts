@@ -1,7 +1,7 @@
 export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v3";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "5.3.0";
-export const REPORT_CONTRACT_VERSION = "dispute-report/5.3.0";
+export const REQUIRED_SKILL_VERSION = "5.3.1";
+export const REPORT_CONTRACT_VERSION = "dispute-report/5.3.1";
 export const TEMPLATE_DOCUMENT_TOKEN = "Kk2edGa13oOrh8xuyM5ced3Gnhh";
 export const TEMPLATE_DOCUMENT_URL = "https://aixuexi.feishu.cn/docx/Kk2edGa13oOrh8xuyM5ced3Gnhh";
 
