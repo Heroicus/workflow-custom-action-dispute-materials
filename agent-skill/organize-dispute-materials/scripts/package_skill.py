@@ -20,7 +20,8 @@ PACKAGE_MEMBERS = (
     "README.md",
     "agents/openai.yaml",
     "references/feishu-runtime-contract.md",
-    "references/report-table-map.md",
+    "references/render-contract.md",
+    "references/report-template.xml",
 )
 
 

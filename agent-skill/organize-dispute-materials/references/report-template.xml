@@ -1,0 +1,1733 @@
+<title>{{document_title}}</title>
+  <p>诉讼/仲裁案件材料梳理报告</p>
+  <h1>
+    <b>一、案件基础信息</b>
+  </h1>
+  <table>
+    <colgroup>
+      <col width="130" />
+      <col width="195" />
+      <col width="129" />
+      <col width="237" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>案件编号</b>
+          </p>
+        </td>
+        <td>
+          <p>{{case_number}}</p>
+        </td>
+        <td>
+          <p>
+            <b>案件来源</b>
+          </p>
+        </td>
+        <td>
+          <p>{{case_source}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>案件类型</b>
+          </p>
+        </td>
+        <td>
+          <p>{{case_type}}</p>
+        </td>
+        <td>
+          <p>
+            <b>案由</b>
+          </p>
+        </td>
+        <td>
+          <p>{{cause}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>受理机构</b>
+          </p>
+        </td>
+        <td>
+          <p>{{tribunal}}</p>
+        </td>
+        <td>
+          <p>
+            <b>案号</b>
+          </p>
+        </td>
+        <td>
+          <p>{{case_docket}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>立案/受理日期</b>
+          </p>
+        </td>
+        <td>
+          <p>{{filing_date}}</p>
+        </td>
+        <td>
+          <p>
+            <b>案件状态</b>
+          </p>
+        </td>
+        <td>
+          <p>{{case_status}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <table>
+    <colgroup>
+      <col width="130" />
+      <col width="216" />
+      <col width="130" />
+      <col width="216" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>我方地位</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_position}}</p>
+        </td>
+        <td>
+          <p>
+            <b>诉讼标的额（元）</b>
+          </p>
+        </td>
+        <td>
+          <p>{{claim_amount}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>承办法官/仲裁员</b>
+          </p>
+        </td>
+        <td>
+          <p>{{judge}}</p>
+        </td>
+        <td>
+          <p>
+            <b>书记员/办案秘书</b>
+          </p>
+        </td>
+        <td>
+          <p>{{clerk}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>我方代理律师</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_lawyer}}</p>
+        </td>
+        <td>
+          <p>
+            <b>授权权限</b>
+          </p>
+        </td>
+        <td>
+          <p>{{authorization_scope}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>业务来源部门</b>
+          </p>
+        </td>
+        <td>
+          <p>{{source_department}}</p>
+        </td>
+        <td>
+          <p>
+            <b>材料接收日期</b>
+          </p>
+        </td>
+        <td>
+          <p>{{material_received_date}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h1>
+    <b>二、当事人信息</b>
+  </h1>
+  <h2>
+    <b>2.1 我方当事人</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="130" />
+      <col width="216" />
+      <col width="143" />
+      <col width="202" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>主体角色</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_role}}</p>
+        </td>
+        <td>
+          <p>
+            <b>所属法人</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_legal_entity}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>主体全称</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_name}}</p>
+        </td>
+        <td>
+          <p>
+            <b>统一社会信用代码</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_credit_code}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>法定代表人</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_legal_representative}}</p>
+        </td>
+        <td>
+          <p>
+            <b>注册地址</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_address}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>联系人/电话</b>
+          </p>
+        </td>
+        <td>
+          <p>{{our_contact}}</p>
+        </td>
+        <td>
+          <p>
+            <b>经办部门</b>
+          </p>
+        </td>
+        <td>
+          <p>{{handling_department}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>
+    <b>2.2 对方当事人（多方时复制本表）</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="130" />
+      <col width="216" />
+      <col width="130" />
+      <col width="216" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>对方姓名/名称</b>
+          </p>
+        </td>
+        <td>
+          <p>{{opponent_name}}</p>
+        </td>
+        <td>
+          <p>
+            <b>主体类型</b>
+          </p>
+        </td>
+        <td>
+          <p>{{opponent_type}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>身份证号/信用码</b>
+          </p>
+        </td>
+        <td>
+          <p>{{opponent_id}}</p>
+        </td>
+        <td>
+          <p>
+            <b>联系电话</b>
+          </p>
+        </td>
+        <td>
+          <p>{{opponent_contact}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>住址</b>
+          </p>
+        </td>
+        <td>
+          <p>{{opponent_address}}</p>
+        </td>
+        <td>
+          <p>
+            <b>代理律师/律所</b>
+          </p>
+        </td>
+        <td>
+          <p>{{opponent_lawyer}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>争议中角色</b>
+          </p>
+        </td>
+        <td>
+          <p>{{opponent_role}}</p>
+        </td>
+        <td>
+          <p>
+            <b>关联案件</b>
+          </p>
+        </td>
+        <td>
+          <p>{{related_case}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p />
+        </td>
+        <td>
+          <p />
+        </td>
+        <td>
+          <p />
+        </td>
+        <td>
+          <p />
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>
+    <b>2.3 第三人 / 其他关联方</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="130" />
+      <col width="216" />
+      <col width="130" />
+      <col width="216" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>第三人名称</b>
+          </p>
+        </td>
+        <td>
+          <p>{{third_party_name}}</p>
+        </td>
+        <td>
+          <p>
+            <b>参诉类型</b>
+          </p>
+        </td>
+        <td>
+          <p>{{third_party_type}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>与本案关系</b>
+          </p>
+        </td>
+        <td>
+          <p>{{third_party_relation}}</p>
+        </td>
+        <td>
+          <p>
+            <b>关联案号</b>
+          </p>
+        </td>
+        <td>
+          <p>{{third_party_case}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h1>
+    <b>三、请求事项</b>
+  </h1>
+  <table>
+    <colgroup>
+      <col width="51" />
+      <col width="202" />
+      <col width="96" />
+      <col width="86" />
+      <col width="152" />
+      <col width="101" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>请求事项（原文摘要）</p>
+        </td>
+        <td>
+          <p>请求类别</p>
+        </td>
+        <td>
+          <p>金额（元）</p>
+        </td>
+        <td>
+          <p>请求权基础（初步）</p>
+        </td>
+        <td>
+          <p>对应证据</p>
+        </td>
+      </tr>
+      <!--request_rows-->
+    </tbody>
+  </table>
+  <h2>反诉/反请求</h2>
+  <table>
+    <colgroup>
+      <col width="56" />
+      <col width="245" />
+      <col width="111" />
+      <col width="167" />
+      <col width="111" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>反诉/反请求事项</p>
+        </td>
+        <td>
+          <p>金额（元）</p>
+        </td>
+        <td>
+          <p>依据</p>
+        </td>
+        <td>
+          <p>对应证据</p>
+        </td>
+      </tr>
+      <!--counterclaim_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>四、案情摘要与时间线</b>
+  </h1>
+  <h2>
+    <b>4.1 事实时间线</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="60" />
+      <col width="118" />
+      <col width="271" />
+      <col width="130" />
+      <col width="110" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>日期</p>
+        </td>
+        <td>
+          <p>事实描述</p>
+        </td>
+        <td>
+          <p>来源材料</p>
+        </td>
+        <td>
+          <p>备注</p>
+        </td>
+      </tr>
+      <!--timeline_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>4.2 事实争议点（双方各执一词的事项）</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="51" />
+      <col width="123" />
+      <col width="155" />
+      <col width="155" />
+      <col width="102" />
+      <col width="102" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>争议事实</p>
+        </td>
+        <td>
+          <p>我方主张及依据</p>
+        </td>
+        <td>
+          <p>对方主张及依据</p>
+        </td>
+        <td>
+          <p>证据对比</p>
+        </td>
+        <td>
+          <p>待核实/补强</p>
+        </td>
+      </tr>
+      <!--fact_dispute_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>五、争议焦点与法律分析</b>
+  </h1>
+  <h2>
+    <b>5.1 争议焦点</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="62" />
+      <col width="312" />
+      <col width="187" />
+      <col width="125" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>争议焦点</p>
+        </td>
+        <td>
+          <p>类型</p>
+        </td>
+        <td>
+          <p>重要程度</p>
+        </td>
+      </tr>
+      <!--focus_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>5.2 我方主张与论证</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="56" />
+      <col width="147" />
+      <col width="203" />
+      <col width="170" />
+      <col width="112" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>争议焦点</p>
+        </td>
+        <td>
+          <p>我方观点</p>
+        </td>
+        <td>
+          <p>事实/法律依据</p>
+        </td>
+        <td>
+          <p>证据支撑</p>
+        </td>
+      </tr>
+      <!--our_argument_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>5.3 对方抗辩及反驳</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="57" />
+      <col width="172" />
+      <col width="115" />
+      <col width="207" />
+      <col width="137" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>对方抗辩观点</p>
+        </td>
+        <td>
+          <p>抗辩类型</p>
+        </td>
+        <td>
+          <p>我方反驳思路</p>
+        </td>
+        <td>
+          <p>需补充证据</p>
+        </td>
+      </tr>
+      <!--opposition_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>5.4 法律依据</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="56" />
+      <col width="136" />
+      <col width="90" />
+      <col width="147" />
+      <col width="170" />
+      <col width="90" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>法律/合同名称</p>
+        </td>
+        <td>
+          <p>条款</p>
+        </td>
+        <td>
+          <p>条文/条款摘要</p>
+        </td>
+        <td>
+          <p>适用要件</p>
+        </td>
+        <td>
+          <p>对应证据</p>
+        </td>
+      </tr>
+      <!--legal_basis_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>六、证据清单</b>
+  </h1>
+  <h2>
+    <b>6.1 证据总表</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="62" />
+      <col width="123" />
+      <col width="96" />
+      <col width="124" />
+      <col width="71" />
+      <col width="43" />
+      <col width="80" />
+      <col width="106" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>编号</p>
+        </td>
+        <td>
+          <p>证据名称</p>
+        </td>
+        <td>
+          <p>证据类型</p>
+        </td>
+        <td>
+          <p>证明目的</p>
+        </td>
+        <td>
+          <p>原件/复印件</p>
+        </td>
+        <td>
+          <p>页数</p>
+        </td>
+        <td>
+          <p>形成/提交日期</p>
+        </td>
+        <td>
+          <p>三性备注</p>
+        </td>
+      </tr>
+      <!--evidence_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>6.2 证据分组（按证明目的）</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="85" />
+      <col width="157" />
+      <col width="145" />
+      <col width="302" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>组别</p>
+        </td>
+        <td>
+          <p>组名</p>
+        </td>
+        <td>
+          <p>包含证据编号</p>
+        </td>
+        <td>
+          <p>证明目的</p>
+        </td>
+      </tr>
+      <!--evidence_group_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>6.3 对方证据及质证意见</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="93" />
+      <col width="156" />
+      <col width="156" />
+      <col width="188" />
+      <col width="93" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>对方证据编号</p>
+        </td>
+        <td>
+          <p>证据名称</p>
+        </td>
+        <td>
+          <p>对方证明目的</p>
+        </td>
+        <td>
+          <p>我方质证意见（三性）</p>
+        </td>
+        <td>
+          <p>是否申请鉴定</p>
+        </td>
+      </tr>
+      <!--opponent_evidence_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>6.4 证据瑕疵与补强清单</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="51" />
+      <col width="102" />
+      <col width="155" />
+      <col width="123" />
+      <col width="155" />
+      <col width="102" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>问题证据</p>
+        </td>
+        <td>
+          <p>瑕疵描述</p>
+        </td>
+        <td>
+          <p>风险</p>
+        </td>
+        <td>
+          <p>补强措施</p>
+        </td>
+        <td>
+          <p>负责人/期限</p>
+        </td>
+      </tr>
+      <!--evidence_defect_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>七、金额计算</b>
+  </h1>
+  <h2>
+    <b>7.1 请求金额汇总</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="116" />
+      <col width="170" />
+      <col width="95" />
+      <col width="95" />
+      <col width="106" />
+      <col width="106" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>项目</p>
+        </td>
+        <td>
+          <p>计算公式/基数</p>
+        </td>
+        <td>
+          <p>起算日</p>
+        </td>
+        <td>
+          <p>截止日</p>
+        </td>
+        <td>
+          <p>利率/标准</p>
+        </td>
+        <td>
+          <p>金额（元）</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>本金/应退款项</p>
+        </td>
+        <td>
+          <p>{{principal_formula}}</p>
+        </td>
+        <td>
+          <p>{{principal_start}}</p>
+        </td>
+        <td>
+          <p>{{principal_end}}</p>
+        </td>
+        <td>
+          <p>{{principal_rate}}</p>
+        </td>
+        <td>
+          <p>{{principal_amount}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>违约金</p>
+        </td>
+        <td>
+          <p>{{penalty_formula}}</p>
+        </td>
+        <td>
+          <p>{{penalty_start}}</p>
+        </td>
+        <td>
+          <p>{{penalty_end}}</p>
+        </td>
+        <td>
+          <p>{{penalty_rate}}</p>
+        </td>
+        <td>
+          <p>{{penalty_amount}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>资金占用利息</p>
+        </td>
+        <td>
+          <p>{{interest_formula}}</p>
+        </td>
+        <td>
+          <p>{{interest_start}}</p>
+        </td>
+        <td>
+          <p>{{interest_end}}</p>
+        </td>
+        <td>
+          <p>{{interest_rate}}</p>
+        </td>
+        <td>
+          <p>{{interest_amount}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>律师费</p>
+        </td>
+        <td>
+          <p>{{lawyer_fee_formula}}</p>
+        </td>
+        <td>
+          <p>{{lawyer_fee_start}}</p>
+        </td>
+        <td>
+          <p>{{lawyer_fee_end}}</p>
+        </td>
+        <td>
+          <p>{{lawyer_fee_rate}}</p>
+        </td>
+        <td>
+          <p>{{lawyer_fee_amount}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>保全/公证费</p>
+        </td>
+        <td>
+          <p>{{preservation_fee_formula}}</p>
+        </td>
+        <td>
+          <p>{{preservation_fee_start}}</p>
+        </td>
+        <td>
+          <p>{{preservation_fee_end}}</p>
+        </td>
+        <td>
+          <p>{{preservation_fee_rate}}</p>
+        </td>
+        <td>
+          <p>{{preservation_fee_amount}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>诉讼费/仲裁费</p>
+        </td>
+        <td>
+          <p>{{case_fee_formula}}</p>
+        </td>
+        <td>
+          <p>{{case_fee_start}}</p>
+        </td>
+        <td>
+          <p>{{case_fee_end}}</p>
+        </td>
+        <td>
+          <p>{{case_fee_rate}}</p>
+        </td>
+        <td>
+          <p>{{case_fee_amount}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>合  计</p>
+        </td>
+        <td>
+          <p>{{total_formula}}</p>
+        </td>
+        <td>
+          <p>{{total_start}}</p>
+        </td>
+        <td>
+          <p>{{total_end}}</p>
+        </td>
+        <td>
+          <p>{{total_rate}}</p>
+        </td>
+        <td>
+          <p>{{total_amount}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>
+    <b>7.2 利息/违约金分段计算明细</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="56" />
+      <col width="167" />
+      <col width="133" />
+      <col width="111" />
+      <col width="88" />
+      <col width="133" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>期间</p>
+        </td>
+        <td>
+          <p>基数（元）</p>
+        </td>
+        <td>
+          <p>日利率</p>
+        </td>
+        <td>
+          <p>天数</p>
+        </td>
+        <td>
+          <p>当期金额（元）</p>
+        </td>
+      </tr>
+      <!--calculation_detail_rows-->
+    </tbody>
+  </table>
+  <h1>八、程序进展记录</h1>
+  <h2>
+    <b>8.1 程序节点日志</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="115" />
+      <col width="103" />
+      <col width="287" />
+      <col width="92" />
+      <col width="92" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>日期</p>
+        </td>
+        <td>
+          <p>事项类型</p>
+        </td>
+        <td>
+          <p>内容描述</p>
+        </td>
+        <td>
+          <p>承办人</p>
+        </td>
+        <td>
+          <p>附件编号</p>
+        </td>
+      </tr>
+      <!--procedure_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>8.2 管辖与受理</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="136" />
+      <col width="208" />
+      <col width="136" />
+      <col width="208" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>管辖依据</b>
+          </p>
+        </td>
+        <td>
+          <p>{{jurisdiction_basis}}</p>
+        </td>
+        <td>
+          <p>
+            <b>管辖异议</b>
+          </p>
+        </td>
+        <td>
+          <p>{{jurisdiction_objection}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>〔仲裁〕仲裁协议</b>
+          </p>
+        </td>
+        <td>
+          <p>{{arbitration_clause}}</p>
+        </td>
+        <td>
+          <p>
+            <b>〔诉讼〕管辖法院</b>
+          </p>
+        </td>
+        <td>
+          <p>{{court}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>答辩/举证期限</b>
+          </p>
+        </td>
+        <td>
+          <p>{{defense_deadline}}</p>
+        </td>
+        <td>
+          <p>
+            <b>开庭时间地点</b>
+          </p>
+        </td>
+        <td>
+          <p>{{hearing_schedule}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>
+    <b>8.3 保全 / 鉴定 / 评估</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="101" />
+      <col width="101" />
+      <col width="182" />
+      <col width="121" />
+      <col width="182" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>类型</p>
+        </td>
+        <td>
+          <p>申请日期</p>
+        </td>
+        <td>
+          <p>事项/标的</p>
+        </td>
+        <td>
+          <p>担保/费用</p>
+        </td>
+        <td>
+          <p>结果/意见摘要</p>
+        </td>
+      </tr>
+      <!--preservation_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>九、裁判 / 裁决结果</b>
+  </h1>
+  <table>
+    <colgroup>
+      <col width="136" />
+      <col width="208" />
+      <col width="136" />
+      <col width="208" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>裁判文书文号</b>
+          </p>
+        </td>
+        <td>
+          <p>{{judgment_number}}</p>
+        </td>
+        <td>
+          <p>
+            <b>裁判日期</b>
+          </p>
+        </td>
+        <td>
+          <p>{{judgment_date}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>结案方式</b>
+          </p>
+        </td>
+        <td>
+          <p>{{closure_type}}</p>
+        </td>
+        <td>
+          <p>
+            <b>胜诉情况</b>
+          </p>
+        </td>
+        <td>
+          <p>{{outcome}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>判项金额（元）</b>
+          </p>
+        </td>
+        <td>
+          <p>{{awarded_amount}}</p>
+        </td>
+        <td>
+          <p>
+            <b>履行期限</b>
+          </p>
+        </td>
+        <td>
+          <p>{{performance_deadline}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>诉讼费分担</b>
+          </p>
+        </td>
+        <td>
+          <p>{{fee_allocation}}</p>
+        </td>
+        <td>
+          <p>
+            <b>上诉/撤销期限</b>
+          </p>
+        </td>
+        <td>
+          <p>{{appeal_deadline}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <table>
+    <colgroup>
+      <col width="136" />
+      <col width="553" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>裁判要旨</p>
+        </td>
+        <td>
+          <p>{{judgment_summary}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>判项</p>
+        </td>
+        <td>
+          <p>{{judgment_orders}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>是否上诉/申请撤销</b>
+          </p>
+        </td>
+        <td>
+          <p>{{appeal_status}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>执行情况</b>
+          </p>
+        </td>
+        <td>
+          <p>{{enforcement_status}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <table>
+    <colgroup>
+      <col width="136" />
+      <col width="208" />
+      <col width="136" />
+      <col width="208" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>
+            <b>二审结果</b>
+          </p>
+        </td>
+        <td>
+          <p>{{second_instance_result}}</p>
+        </td>
+        <td>
+          <p>
+            <b>实际回款（元）</b>
+          </p>
+        </td>
+        <td>
+          <p>{{actual_recovery}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h1>
+    <b>十、费用与成本</b>
+  </h1>
+  <table>
+    <colgroup>
+      <col width="146" />
+      <col width="136" />
+      <col width="136" />
+      <col width="271" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>费用项目</p>
+        </td>
+        <td>
+          <p>预算金额（元）</p>
+        </td>
+        <td>
+          <p>实际金额（元）</p>
+        </td>
+        <td>
+          <p>备注</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>诉讼/仲裁费</p>
+        </td>
+        <td>
+          <p>{{case_cost_budget}}</p>
+        </td>
+        <td>
+          <p>{{case_cost_actual}}</p>
+        </td>
+        <td>
+          <p>{{case_cost_note}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>律师费</p>
+        </td>
+        <td>
+          <p>{{lawyer_cost_budget}}</p>
+        </td>
+        <td>
+          <p>{{lawyer_cost_actual}}</p>
+        </td>
+        <td>
+          <p>{{lawyer_cost_note}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>差旅费</p>
+        </td>
+        <td>
+          <p>{{travel_cost_budget}}</p>
+        </td>
+        <td>
+          <p>{{travel_cost_actual}}</p>
+        </td>
+        <td>
+          <p>{{travel_cost_note}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>鉴定/公证费</p>
+        </td>
+        <td>
+          <p>{{appraisal_cost_budget}}</p>
+        </td>
+        <td>
+          <p>{{appraisal_cost_actual}}</p>
+        </td>
+        <td>
+          <p>{{appraisal_cost_note}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>保全费/担保费</p>
+        </td>
+        <td>
+          <p>{{preservation_cost_budget}}</p>
+        </td>
+        <td>
+          <p>{{preservation_cost_actual}}</p>
+        </td>
+        <td>
+          <p>{{preservation_cost_note}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>其他费用</p>
+        </td>
+        <td>
+          <p>{{other_cost_budget}}</p>
+        </td>
+        <td>
+          <p>{{other_cost_actual}}</p>
+        </td>
+        <td>
+          <p>{{other_cost_note}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>合  计</p>
+        </td>
+        <td>
+          <p>{{cost_total_budget}}</p>
+        </td>
+        <td>
+          <p>{{cost_total_actual}}</p>
+        </td>
+        <td>
+          <p>{{cost_total_note}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h1>
+    <b>十一、风险提示与建议（AI辅助分析）</b>
+  </h1>
+  <h2>
+    <b>11.1 风险清单</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="52" />
+      <col width="208" />
+      <col width="93" />
+      <col width="83" />
+      <col width="83" />
+      <col width="167" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>风险点</p>
+        </td>
+        <td>
+          <p>风险类型</p>
+        </td>
+        <td>
+          <p>可能性</p>
+        </td>
+        <td>
+          <p>风险等级</p>
+        </td>
+        <td>
+          <p>应对措施</p>
+        </td>
+      </tr>
+      <!--risk_rows-->
+    </tbody>
+  </table>
+  <h2>
+    <b>11.2 结果预判与处理建议</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="146" />
+      <col width="543" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>项目</p>
+        </td>
+        <td>
+          <p />
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>胜诉/支持概率</b>
+          </p>
+        </td>
+        <td>
+          <p>{{support_probability}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>预计支持金额区间</b>
+          </p>
+        </td>
+        <td>
+          <p>{{expected_amount_range}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>主要不确定性</b>
+          </p>
+        </td>
+        <td>
+          <p>{{main_uncertainty}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>和解/调解建议</b>
+          </p>
+        </td>
+        <td>
+          <p>{{settlement_advice}}</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>
+            <b>后续合规整改</b>
+          </p>
+        </td>
+        <td>
+          <p>{{compliance_followup}}</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>
+    <b>11.3 类案参考</b>
+  </h2>
+  <table>
+    <colgroup>
+      <col width="52" />
+      <col width="158" />
+      <col width="158" />
+      <col width="212" />
+      <col width="106" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>案号</p>
+        </td>
+        <td>
+          <p>法院/仲裁机构</p>
+        </td>
+        <td>
+          <p>裁判要旨</p>
+        </td>
+        <td>
+          <p>可援引性</p>
+        </td>
+      </tr>
+      <!--precedent_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>十二、待办事项</b>
+  </h1>
+  <table>
+    <colgroup>
+      <col width="56" />
+      <col width="226" />
+      <col width="112" />
+      <col width="90" />
+      <col width="112" />
+      <col width="90" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>待办事项</p>
+        </td>
+        <td>
+          <p>关联部分</p>
+        </td>
+        <td>
+          <p>负责人</p>
+        </td>
+        <td>
+          <p>截止日期</p>
+        </td>
+        <td>
+          <p>状态</p>
+        </td>
+      </tr>
+      <!--todo_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>十三、材料完整性核查</b>
+  </h1>
+  <table>
+    <colgroup>
+      <col width="51" />
+      <col width="355" />
+      <col width="101" />
+      <col width="182" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>核查项</p>
+        </td>
+        <td>
+          <p>是否具备</p>
+        </td>
+        <td>
+          <p>缺项说明/材料编号</p>
+        </td>
+      </tr>
+      <!--completeness_rows-->
+    </tbody>
+  </table>
+  <h1>
+    <b>十四、矛盾信息登记</b>
+  </h1>
+  <table>
+    <colgroup>
+      <col width="52" />
+      <col width="136" />
+      <col width="167" />
+      <col width="167" />
+      <col width="167" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>事项</p>
+        </td>
+        <td>
+          <p>材料A记载</p>
+        </td>
+        <td>
+          <p>材料B记载</p>
+        </td>
+        <td>
+          <p>处理建议</p>
+        </td>
+      </tr>
+      <!--conflict_rows-->
+    </tbody>
+  </table>
+  <h1>十五、AI输出质量自检</h1>
+  <table>
+    <colgroup>
+      <col width="57" />
+      <col width="517" />
+      <col width="115" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>序号</p>
+        </td>
+        <td>
+          <p>检查项</p>
+        </td>
+        <td>
+          <p>结果</p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <table>
+    <colgroup>
+      <col width="345" />
+      <col width="345" />
+    </colgroup>
+    <tbody>
+      <tr>
+        <td>
+          <p>整理人（法务）</p>
+        </td>
+        <td>
+          <p>审核人（法务总监）</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p>整理人（法务）：_______________</p>
+        </td>
+        <td>
+          <p>审核人（法务总监）：_______________</p>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p />
+        </td>
+        <td>
+          <p />
+        </td>
+      </tr>
+    </tbody>
+  </table>

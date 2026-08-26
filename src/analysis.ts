@@ -1,8 +1,6 @@
-export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v5";
+export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "5.4.1";
-export const TEMPLATE_DOCUMENT_TOKEN = "Kk2edGa13oOrh8xuyM5ced3Gnhh";
-export const TEMPLATE_DOCUMENT_URL = "https://aixuexi.feishu.cn/docx/Kk2edGa13oOrh8xuyM5ced3Gnhh";
+export const REQUIRED_SKILL_VERSION = "6.0.0";
 
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";
 export const PRODUCTION_TABLE_ID = "tbllz7nrxSIH8frX";
@@ -71,9 +69,6 @@ export function buildAnalysisPrompt(input: AnalysisPromptInput): string {
     component_build: requiredText(input.componentBuild, "componentBuild"),
     required_skill_version: REQUIRED_SKILL_VERSION,
     baseline_field_name: BASELINE_FIELD_NAME,
-    template_document_token: TEMPLATE_DOCUMENT_TOKEN,
-    template_document_url: TEMPLATE_DOCUMENT_URL,
-    template_document_type: "docx",
     field_contract: PRODUCTION_FIELD_CONTRACT,
   });
 }
