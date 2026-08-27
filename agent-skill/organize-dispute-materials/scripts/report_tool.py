@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministically render and validate the fixed dispute report XML."""
+"""Build, render and verify one source-backed dispute-material report."""
 
 from __future__ import annotations
 
@@ -11,8 +11,9 @@ import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +25,19 @@ ROW_PATTERN = re.compile(r"<!--([A-Za-z][A-Za-z0-9_]*_rows)-->")
 UNRESOLVED_PATTERN = re.compile(r"\{\{[^{}]+\}\}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 NUMERIC_LITERAL_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?![A-Za-z0-9])")
+BASE_FIELD_KEYS = ("case_name", "case_type", "filing_date", "case_status")
+BASE_FIELD_NAMES = {
+    "case_name": "案件名称",
+    "case_type": "案件类型",
+    "filing_date": "立案（收案）日期",
+    "case_status": "案件状态",
+}
+EXACT_SOURCE_SCALARS = {
+    "case_type", "cause", "tribunal", "case_docket", "our_position", "our_role",
+    "our_legal_entity", "our_name", "our_credit_code", "our_legal_representative",
+    "opponent_name", "opponent_id", "opponent_role", "judge", "clerk", "judgment_number",
+}
+NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
 
 
 class ReportError(Exception):
@@ -45,6 +59,61 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def json_values(source: str) -> Iterator[Any]:
+    """Yield JSON values from a clean response or a proxy/log wrapper."""
+
+    decoder = json.JSONDecoder()
+    stripped = source.strip()
+    if not stripped:
+        return
+    try:
+        yield json.loads(stripped)
+        return
+    except json.JSONDecodeError:
+        pass
+    cursor = 0
+    while cursor < len(source):
+        match = re.search(r"[\[{]", source[cursor:])
+        if not match:
+            return
+        start = cursor + match.start()
+        try:
+            value, end = decoder.raw_decode(source, start)
+        except json.JSONDecodeError:
+            cursor = start + 1
+            continue
+        yield value
+        cursor = end
+
+
+def walk_values(value: Any) -> Iterator[Any]:
+    yield value
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from walk_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk_values(item)
+    elif isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        for nested in json_values(value):
+            yield from walk_values(nested)
+
+
+def read_response_values(path: Path) -> list[Any]:
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReportError("RESPONSE_UNAVAILABLE", f"无法读取响应：{path}", {"reason": str(exc)}) from exc
+    values = list(json_values(source))
+    if not values:
+        raise ReportError("RESPONSE_INVALID", f"响应中没有可解析 JSON：{path}")
+    for root in values:
+        for item in walk_values(root):
+            if isinstance(item, dict) and item.get("ok") is False:
+                raise ReportError("REMOTE_OPERATION_FAILED", "远程操作返回失败", {"error": item.get("error", item)})
+    return values
+
+
 def scalar_text(value: Any, path: str) -> str:
     if value is None:
         return ""
@@ -53,6 +122,21 @@ def scalar_text(value: Any, path: str) -> str:
     if isinstance(value, (str, int, float)):
         return str(value).strip()
     raise ReportError("FACT_VALUE_INVALID", f"{path} 必须是字符串、数字、布尔值或 null")
+
+
+def scalarish(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return str(value).strip()
+    if isinstance(value, list):
+        return scalarish(value[0]) if value else ""
+    if isinstance(value, dict):
+        for key in ("text", "value", "name", "url", "link", "id"):
+            result = scalarish(value.get(key))
+            if result:
+                return result
+    return ""
 
 
 def escaped(value: Any, path: str) -> str:
@@ -74,8 +158,7 @@ def load_contract(template_path: Path, schema_path: Path) -> tuple[str, dict[str
     schema_rows = set(rows)
     if template_rows != schema_rows:
         raise ReportError(
-            "SCHEMA_INVALID",
-            "模板行标记与渲染结构不一致",
+            "SCHEMA_INVALID", "模板行标记与渲染结构不一致",
             {"template_only": sorted(template_rows - schema_rows), "schema_only": sorted(schema_rows - template_rows)},
         )
     return template, schema
@@ -94,42 +177,52 @@ def render_row(marker: str, columns: Sequence[str], row: Any, index: int) -> str
     return f"<tr>{cells}</tr>"
 
 
-def render_report(facts: dict[str, Any], template: str, schema: dict[str, Any]) -> str:
-    scalars = facts.get("scalars", {})
-    rows = facts.get("rows", {})
-    if not isinstance(scalars, dict) or not isinstance(rows, dict):
-        raise ReportError("FACTS_INVALID", "facts 必须包含对象类型的 scalars 和 rows")
-
+def validate_fact_shape(facts: dict[str, Any], template: str, schema: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    scalars = facts.get("scalars")
+    rows = facts.get("rows")
+    base_fields = facts.get("base_fields")
+    if not isinstance(scalars, dict) or not isinstance(rows, dict) or not isinstance(base_fields, dict):
+        raise ReportError("FACTS_INVALID", "facts 必须包含 scalars、rows 和 base_fields 对象")
     scalar_markers = set(SCALAR_PATTERN.findall(template))
-    unknown_scalars = sorted(set(scalars) - scalar_markers)
-    unknown_rows = sorted(set(rows) - set(schema["dynamic_rows"]))
-    if unknown_scalars or unknown_rows:
-        raise ReportError(
-            "FACTS_INVALID",
-            "facts 包含模板未定义字段",
-            {"unknown_scalars": unknown_scalars, "unknown_rows": unknown_rows},
-        )
+    row_markers = set(schema["dynamic_rows"])
+    problems = {
+        "missing_scalars": sorted(scalar_markers - set(scalars)),
+        "unknown_scalars": sorted(set(scalars) - scalar_markers),
+        "missing_rows": sorted(row_markers - set(rows)),
+        "unknown_rows": sorted(set(rows) - row_markers),
+        "missing_base_fields": sorted(set(BASE_FIELD_KEYS) - set(base_fields)),
+        "unknown_base_fields": sorted(set(base_fields) - set(BASE_FIELD_KEYS)),
+    }
+    if any(problems.values()):
+        raise ReportError("FACT_CONTRACT_INCOMPLETE", "case-facts.json 不是完整脚手架", problems)
+    for marker, columns in schema["dynamic_rows"].items():
+        values = rows[marker]
+        if not isinstance(values, list):
+            raise ReportError("FACT_ROW_INVALID", f"rows.{marker} 必须是数组")
+        for index, row in enumerate(values):
+            if not isinstance(row, dict):
+                raise ReportError("FACT_ROW_INVALID", f"rows.{marker}[{index}] 必须是对象")
+            unknown = sorted(set(row) - set(columns))
+            if unknown:
+                raise ReportError("FACT_ROW_INVALID", f"rows.{marker}[{index}] 包含未知字段", {"unknown": unknown})
     for name in schema.get("required_scalars", []):
         if not scalar_text(scalars.get(name), f"scalars.{name}"):
             raise ReportError("REQUIRED_FACT_MISSING", f"缺少必填字段 scalars.{name}")
+    return scalars, rows, base_fields
 
+
+def render_report(facts: dict[str, Any], template: str, schema: dict[str, Any]) -> str:
+    scalars, rows, _ = validate_fact_shape(facts, template, schema)
     case_number = scalar_text(scalars.get("case_number"), "scalars.case_number")
     prepared_scalars = dict(scalars)
     if not scalar_text(prepared_scalars.get("document_title"), "scalars.document_title"):
         prepared_scalars["document_title"] = f"{case_number} 诉讼/仲裁案件材料梳理报告"
-
     output = template
-    for marker in sorted(scalar_markers):
+    for marker in sorted(SCALAR_PATTERN.findall(template)):
         output = output.replace(f"{{{{{marker}}}}}", escaped(prepared_scalars.get(marker), f"scalars.{marker}"))
     for marker, columns in schema["dynamic_rows"].items():
-        values = rows.get(marker, [])
-        if values is None:
-            values = []
-        if not isinstance(values, list):
-            raise ReportError("FACT_ROW_INVALID", f"rows.{marker} 必须是数组")
-        replacement = "".join(render_row(marker, columns, row, index) for index, row in enumerate(values))
+        replacement = "".join(render_row(marker, columns, row, index) for index, row in enumerate(rows[marker]))
         output = output.replace(f"<!--{marker}-->", replacement)
-
     leftovers = sorted(set(SCALAR_PATTERN.findall(output)) | set(ROW_PATTERN.findall(output)))
     if leftovers or UNRESOLVED_PATTERN.search(output):
         raise ReportError("TEMPLATE_MARKER_REMAINS", "渲染结果仍有模板标记", {"markers": leftovers})
@@ -155,6 +248,10 @@ def normalize_text(value: str) -> str:
     return WHITESPACE_PATTERN.sub(" ", html.unescape(value or "")).strip()
 
 
+def source_key(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", html.unescape(value or "")).lower()
+
+
 def element_text(element: ET.Element) -> str:
     return normalize_text("".join(element.itertext()))
 
@@ -162,8 +259,7 @@ def element_text(element: ET.Element) -> str:
 def table_rows(table: ET.Element) -> list[list[str]]:
     return [
         [element_text(cell) for cell in list(row) if local_name(cell.tag) in {"td", "th"}]
-        for row in table.iter()
-        if local_name(row.tag) == "tr"
+        for row in table.iter() if local_name(row.tag) == "tr"
     ]
 
 
@@ -187,104 +283,76 @@ def dynamic_table_flags(template: str) -> list[bool]:
     return [bool(ROW_PATTERN.search(table)) for table in tables]
 
 
-def compare_table(
-    expected_rows: list[list[str]],
-    actual_rows: list[list[str]],
-    allows_dynamic_rows: bool,
-    position: int,
-) -> None:
+def compare_table(expected_rows: list[list[str]], actual_rows: list[list[str]], allows_dynamic_rows: bool, position: int) -> None:
     if allows_dynamic_rows:
         if len(actual_rows) < len(expected_rows):
             raise ReportError("REPORT_STRUCTURE_INVALID", "动态表格缺少固定行", {"position": position})
     elif len(expected_rows) != len(actual_rows):
         raise ReportError(
-            "REPORT_STRUCTURE_INVALID",
-            "固定表格行数不正确",
+            "REPORT_STRUCTURE_INVALID", "固定表格行数不正确",
             {"position": position, "expected": len(expected_rows), "actual": len(actual_rows)},
         )
     for row_index, (expected_cells, actual_cells) in enumerate(zip(expected_rows, actual_rows)):
         if len(expected_cells) != len(actual_cells):
-            raise ReportError(
-                "REPORT_STRUCTURE_INVALID",
-                "表格列数不正确",
-                {"position": position, "row": row_index},
-            )
+            raise ReportError("REPORT_STRUCTURE_INVALID", "表格列数不正确", {"position": position, "row": row_index})
         for cell_index, (template_cell, actual_cell) in enumerate(zip(expected_cells, actual_cells)):
             static_text, has_marker = template_cell_pattern(template_cell)
             if has_marker:
                 if static_text and static_text not in actual_cell:
-                    raise ReportError(
-                        "REPORT_STRUCTURE_INVALID",
-                        "表格固定标签不正确",
-                        {"position": position, "row": row_index, "cell": cell_index},
-                    )
+                    raise ReportError("REPORT_STRUCTURE_INVALID", "表格固定标签不正确", {"position": position, "row": row_index, "cell": cell_index})
             elif template_cell != actual_cell:
                 raise ReportError(
-                    "REPORT_STRUCTURE_INVALID",
-                    "表格固定内容不正确",
-                    {
-                        "position": position,
-                        "row": row_index,
-                        "cell": cell_index,
-                        "expected": template_cell,
-                        "actual": actual_cell,
-                    },
+                    "REPORT_STRUCTURE_INVALID", "表格固定内容不正确",
+                    {"position": position, "row": row_index, "cell": cell_index, "expected": template_cell, "actual": actual_cell},
                 )
 
 
 def compare_structure(actual: ET.Element, template_root: ET.Element, template: str, schema: dict[str, Any]) -> None:
     expected = structure_signature(template_root)
     received = structure_signature(actual)
-    expected_counts = schema["structure"]
     actual_counts = {
         "h1_count": sum(kind == "h1" for kind, _ in received),
         "h2_count": sum(kind == "h2" for kind, _ in received),
         "table_count": sum(kind == "table" for kind, _ in received),
     }
-    if actual_counts != expected_counts:
-        raise ReportError("REPORT_STRUCTURE_INVALID", "章节或表格数量不正确", {"expected": expected_counts, "actual": actual_counts})
+    if actual_counts != schema["structure"]:
+        raise ReportError("REPORT_STRUCTURE_INVALID", "章节或表格数量不正确", {"expected": schema["structure"], "actual": actual_counts})
     if len(received) != len(expected):
         raise ReportError("REPORT_STRUCTURE_INVALID", "章节与表格序列长度不正确")
-
     table_flags = iter(dynamic_table_flags(template))
     for index, ((expected_kind, expected_value), (actual_kind, actual_value)) in enumerate(zip(expected, received)):
         if expected_kind != actual_kind:
             raise ReportError("REPORT_STRUCTURE_INVALID", "章节与表格顺序不正确", {"position": index})
         if expected_kind in {"h1", "h2"}:
             if expected_value != actual_value:
-                raise ReportError(
-                    "REPORT_STRUCTURE_INVALID",
-                    "章节标题不正确",
-                    {"position": index, "expected": expected_value, "actual": actual_value},
-                )
-            continue
-        compare_table(expected_value, actual_value, next(table_flags), index)
+                raise ReportError("REPORT_STRUCTURE_INVALID", "章节标题不正确", {"position": index, "expected": expected_value, "actual": actual_value})
+        else:
+            compare_table(expected_value, actual_value, next(table_flags), index)
 
 
-def fact_values(facts: dict[str, Any], schema: dict[str, Any]) -> Iterable[str]:
+def fact_values(facts: dict[str, Any], schema: dict[str, Any], evidentiary_only: bool = False) -> Iterable[str]:
     scalars = facts.get("scalars", {})
     if isinstance(scalars, dict):
         for name, value in scalars.items():
-            if name in {"case_number", "document_title"}:
-                continue
-            yield scalar_text(value, f"scalars.{name}")
+            if name not in {"case_number", "document_title"}:
+                yield scalar_text(value, f"scalars.{name}")
     rows = facts.get("rows", {})
-    if isinstance(rows, dict):
-        for marker, values in rows.items():
-            if marker not in schema["dynamic_rows"] or not isinstance(values, list):
+    if not isinstance(rows, dict):
+        return
+    for marker, values in rows.items():
+        if marker not in schema["dynamic_rows"] or not isinstance(values, list):
+            continue
+        if evidentiary_only and marker in NON_EVIDENTIARY_ROWS:
+            continue
+        for index, row in enumerate(values):
+            if not isinstance(row, dict):
                 continue
-            for index, row in enumerate(values):
-                if not isinstance(row, dict):
-                    continue
-                for column, value in row.items():
-                    if column == "index":
-                        continue
+            for column, value in row.items():
+                if column != "index":
                     yield scalar_text(value, f"rows.{marker}[{index}].{column}")
 
 
 def numeric_literals(value: str) -> set[str]:
-    """Extract material numeric literals while ignoring short clause numbers."""
-
     values: set[str] = set()
     for match in NUMERIC_LITERAL_PATTERN.finditer(value):
         literal = match.group(0).replace(",", "")
@@ -293,23 +361,173 @@ def numeric_literals(value: str) -> set[str]:
     return values
 
 
-def validate_fact_evidence(facts: dict[str, Any], schema: dict[str, Any], source_corpus: str) -> dict[str, Any]:
-    """Require every material numeric fact to occur in extracted material text."""
+def manifest_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    items = manifest.get("items")
+    if not isinstance(items, list) or not items:
+        raise ReportError("MATERIAL_MANIFEST_INVALID", "材料清单没有附件项")
+    leaves: list[dict[str, Any]] = []
 
-    corpus = re.sub(r"[\s,，]", "", source_corpus)
-    literals = set().union(*(numeric_literals(value) for value in fact_values(facts, schema)))
-    unsupported = sorted(
-        literal
-        for literal in literals
-        if not re.search(rf"(?<!\d){re.escape(literal)}(?!\d)", corpus)
-    )
-    if unsupported:
+    def visit(item: Any) -> None:
+        if not isinstance(item, dict):
+            raise ReportError("MATERIAL_MANIFEST_INVALID", "材料清单项必须是对象")
+        children = item.get("children")
+        if isinstance(children, list) and children:
+            for child in children:
+                visit(child)
+        elif item.get("status") != "ignored":
+            leaves.append(item)
+
+    for item in items:
+        visit(item)
+    if not leaves:
+        raise ReportError("MATERIAL_MANIFEST_INVALID", "材料清单没有可处理内容")
+    return leaves
+
+
+def evidence_type(name: str) -> str:
+    suffix = Path(name.removesuffix(".larkcache")).suffix.lower()
+    if suffix == ".pdf":
+        return "PDF"
+    if suffix in {".doc", ".docx"}:
+        return "Word"
+    if suffix in {".xls", ".xlsx", ".csv"}:
+        return "表格"
+    if suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
+        return "图片"
+    if suffix in {".m4a", ".mp3", ".wav", ".aac"}:
+        return "音频"
+    return "文件"
+
+
+def build_scaffold(case_number: str, manifest: dict[str, Any], template: str, schema: dict[str, Any]) -> dict[str, Any]:
+    entries = manifest_entries(manifest)
+    scalars = {name: "" for name in sorted(set(SCALAR_PATTERN.findall(template)))}
+    scalars["case_number"] = case_number
+    rows: dict[str, list[dict[str, str]]] = {name: [] for name in schema["dynamic_rows"]}
+    for index, item in enumerate(entries, 1):
+        name = scalarish(item.get("file_name"))
+        status = scalarish(item.get("status")) or "failed"
+        pages = scalarish(item.get("page_count"))
+        methods = item.get("methods") if isinstance(item.get("methods"), list) else []
+        rows["evidence_rows"].append({
+            "index": str(index), "name": name, "type": evidence_type(name), "purpose": "",
+            "original_status": "", "pages": pages, "date": "", "existing_note": "",
+        })
+        availability = {"complete": "是", "partial": "部分", "failed": "否"}.get(status, "否")
+        note = {"complete": "解析完成", "partial": "仅部分内容可读取", "failed": "该文件无法解析"}.get(status, "该文件无法解析")
+        if methods:
+            note += f"（{','.join(str(item) for item in methods)}）"
+        rows["completeness_rows"].append({
+            "index": str(index), "source_check_item": name, "available": availability, "source_note": note,
+        })
+    counts = Counter(scalarish(item.get("status")) or "failed" for item in entries)
+    rows["quality_rows"] = [{
+        "index": "1", "check": "材料读取情况",
+        "result": f"共{len(entries)}项，完整{counts['complete']}项，部分{counts['partial']}项，无法解析{counts['failed']}项",
+    }]
+    return {"scalars": scalars, "rows": rows, "base_fields": {key: "" for key in BASE_FIELD_KEYS}}
+
+
+def validate_manifest_coverage(rows: dict[str, Any], manifest: dict[str, Any]) -> Counter[str]:
+    entries = manifest_entries(manifest)
+    expected = [scalarish(item.get("file_name")) for item in entries]
+    evidence = [scalarish(row.get("name")) for row in rows["evidence_rows"]]
+    completeness = [scalarish(row.get("source_check_item")) for row in rows["completeness_rows"]]
+    if Counter(evidence) != Counter(expected) or Counter(completeness) != Counter(expected):
         raise ReportError(
-            "FACT_NUMERIC_UNSUPPORTED",
-            "结构化事实含有未在材料文本或 OCR 文本中出现的数字",
-            {"values": unsupported[:20], "total": len(unsupported)},
+            "MATERIAL_COVERAGE_INCOMPLETE", "证据清单或材料完整性表未覆盖全部材料",
+            {
+                "expected": len(expected), "evidence_rows": len(evidence), "completeness_rows": len(completeness),
+                "missing_evidence": sorted((Counter(expected) - Counter(evidence)).elements())[:10],
+                "missing_completeness": sorted((Counter(expected) - Counter(completeness)).elements())[:10],
+            },
         )
-    return {"status": "valid", "numeric_literal_count": len(literals)}
+    if not rows["quality_rows"]:
+        raise ReportError("MATERIAL_COVERAGE_INCOMPLETE", "AI 输出质量自检表缺少材料读取情况")
+    return Counter(scalarish(item.get("status")) or "failed" for item in entries)
+
+
+def require_source_sections(scalars: dict[str, Any], rows: dict[str, Any], corpus_key: str) -> None:
+    missing: list[str] = []
+
+    def has(*phrases: str) -> bool:
+        return any(source_key(phrase) in corpus_key for phrase in phrases)
+
+    def scalar_required(name: str) -> None:
+        if not scalar_text(scalars.get(name), f"scalars.{name}"):
+            missing.append(f"scalars.{name}")
+
+    def row_required(name: str) -> None:
+        if not rows.get(name):
+            missing.append(f"rows.{name}")
+
+    if has("原告", "被告", "申请人", "被申请人") and has("起诉状", "仲裁申请书", "裁决书", "判决书"):
+        scalar_required("our_name")
+        scalar_required("opponent_name")
+    if has("仲裁请求", "诉讼请求", "请求为"):
+        row_required("request_rows")
+    if has("双方对下列要素事实存在争议", "本院认为", "本委认定及理由"):
+        row_required("focus_rows")
+        row_required("legal_basis_rows")
+    if has("开庭时间", "公开开庭审理"):
+        row_required("procedure_rows")
+    if has("现裁决如下", "判决如下"):
+        scalar_required("judgment_number")
+        scalar_required("case_status")
+        if not scalar_text(scalars.get("judgment_summary"), "scalars.judgment_summary") and not scalar_text(scalars.get("judgment_orders"), "scalars.judgment_orders"):
+            missing.append("scalars.judgment_summary|judgment_orders")
+        scalar_required("outcome")
+    if missing:
+        raise ReportError("FACT_COVERAGE_INCOMPLETE", "材料明确包含的核心内容未进入报告", {"missing": missing})
+
+
+def validate_fact_evidence(
+    facts: dict[str, Any], template: str, schema: dict[str, Any], source_corpus: str, manifest: dict[str, Any],
+) -> dict[str, Any]:
+    scalars, rows, base_fields = validate_fact_shape(facts, template, schema)
+    counts = validate_manifest_coverage(rows, manifest)
+    evidence_corpus = "\n".join(
+        line for line in source_corpus.splitlines()
+        if not line.startswith(("=== ", "--- "))
+    )
+    if len(source_key(evidence_corpus)) < 20:
+        raise ReportError("SOURCE_CORPUS_EMPTY", "附件没有产生可用正文或 OCR 文本")
+    corpus_numeric = re.sub(r"[\s,，]", "", evidence_corpus)
+    literals = set().union(*(numeric_literals(value) for value in fact_values(facts, schema, evidentiary_only=True)))
+    unsupported_numbers = sorted(literal for literal in literals if not re.search(rf"(?<!\d){re.escape(literal)}(?!\d)", corpus_numeric))
+    if unsupported_numbers:
+        raise ReportError(
+            "FACT_NUMERIC_UNSUPPORTED", "结构化事实含有未在材料文本或 OCR 文本中出现的数字",
+            {"values": unsupported_numbers[:20], "total": len(unsupported_numbers)},
+        )
+    corpus_key = source_key(evidence_corpus)
+    unsupported_scalars: list[str] = []
+    for name in sorted(EXACT_SOURCE_SCALARS):
+        value = scalar_text(scalars.get(name), f"scalars.{name}")
+        if value and source_key(value) not in corpus_key:
+            unsupported_scalars.append(name)
+    if unsupported_scalars:
+        raise ReportError("FACT_LITERAL_UNSUPPORTED", "姓名、机构、案号或身份字段无原文支持", {"fields": unsupported_scalars})
+    require_source_sections(scalars, rows, corpus_key)
+    case_type = scalar_text(scalars.get("case_type"), "scalars.case_type")
+    case_status = scalar_text(scalars.get("case_status"), "scalars.case_status")
+    base_case_type = scalar_text(base_fields.get("case_type"), "base_fields.case_type")
+    base_case_status = scalar_text(base_fields.get("case_status"), "base_fields.case_status")
+    if case_type not in {"", "诉讼", "仲裁"} or base_case_type not in {"", "诉讼", "仲裁"}:
+        raise ReportError("BASE_FIELD_INVALID", "案件类型只能为诉讼或仲裁")
+    allowed_status = {"", "待立案", "审理中", "已结案", "已归档"}
+    if case_status not in allowed_status or base_case_status not in allowed_status:
+        raise ReportError("BASE_FIELD_INVALID", "案件状态不是 Base 现有选项")
+    if case_type and base_case_type != case_type:
+        raise ReportError("BASE_FIELD_MISMATCH", "报告案件类型与 Base 回写值不一致")
+    if case_status and base_case_status != case_status:
+        raise ReportError("BASE_FIELD_MISMATCH", "报告案件状态与 Base 回写值不一致")
+    if (scalar_text(scalars.get("our_name"), "scalars.our_name") or scalar_text(scalars.get("opponent_name"), "scalars.opponent_name")) and not scalar_text(base_fields.get("case_name"), "base_fields.case_name"):
+        raise ReportError("BASE_FIELD_MISSING", "已识别当事人但未生成案件名称")
+    return {
+        "status": "valid", "numeric_literal_count": len(literals), "material_count": sum(counts.values()),
+        "complete_materials": counts["complete"], "partial_materials": counts["partial"], "failed_materials": counts["failed"],
+    }
 
 
 def validate_report(source: str, template: str, schema: dict[str, Any], facts: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -318,18 +536,14 @@ def validate_report(source: str, template: str, schema: dict[str, Any], facts: d
     actual = parse_fragment(source)
     template_root = parse_fragment(template)
     compare_structure(actual, template_root, template, schema)
-
     full_text = element_text(actual)
     template_text = element_text(template_root)
-    forbidden = [
-        item
-        for item in schema.get("forbidden_text", [])
-        if item and full_text.count(item) > template_text.count(item)
-    ]
+    forbidden = [item for item in schema.get("forbidden_text", []) if item and full_text.count(item) > template_text.count(item)]
     if forbidden:
         raise ReportError("REPORT_TEXT_INVALID", "报告包含禁用占位词或错误术语", {"matches": forbidden})
     if facts is not None:
-        case_number = scalar_text(facts.get("scalars", {}).get("case_number"), "scalars.case_number")
+        validate_fact_shape(facts, template, schema)
+        case_number = scalar_text(facts["scalars"].get("case_number"), "scalars.case_number")
         title = next((element_text(item) for item in actual if local_name(item.tag) == "title"), "")
         if case_number and case_number not in title:
             raise ReportError("REPORT_TITLE_INVALID", "文档标题缺少案件编号", {"case_number": case_number})
@@ -337,13 +551,7 @@ def validate_report(source: str, template: str, schema: dict[str, Any], facts: d
         missing = sorted({value for value in fact_values(facts, schema) if len(normalize_text(value)) >= 2 and normalize_text(value) not in normalized_report})
         if missing:
             raise ReportError("REPORT_FACT_MISSING", "结构化事实未完整写入报告", {"values": missing[:20], "total": len(missing)})
-    return {
-        "status": "valid",
-        "sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-        "h1_count": schema["structure"]["h1_count"],
-        "h2_count": schema["structure"]["h2_count"],
-        "table_count": schema["structure"]["table_count"],
-    }
+    return {"status": "valid", "sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), **schema["structure"]}
 
 
 def extract_document_content(path: Path) -> str:
@@ -351,22 +559,139 @@ def extract_document_content(path: Path) -> str:
         source = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ReportError("REPORT_UNAVAILABLE", f"无法读取报告：{path}", {"reason": str(exc)}) from exc
-    stripped = source.lstrip()
-    if not stripped.startswith("{"):
+    if not source.lstrip().startswith(("{", "[")):
         return source
-    try:
-        payload = json.loads(source)
-    except json.JSONDecodeError:
-        return source
-    candidates = [
-        payload.get("content") if isinstance(payload, dict) else None,
-        payload.get("data", {}).get("document", {}).get("content") if isinstance(payload, dict) else None,
-        payload.get("document", {}).get("content") if isinstance(payload, dict) else None,
-    ]
-    content = next((item for item in candidates if isinstance(item, str) and item.strip()), None)
-    if not content:
-        raise ReportError("REPORT_UNAVAILABLE", "JSON 中没有文档 content")
-    return content
+    for root in json_values(source):
+        for value in walk_values(root):
+            if isinstance(value, dict):
+                content = value.get("content")
+                if isinstance(content, str) and "<title" in content and "<table" in content:
+                    return content
+    raise ReportError("REPORT_UNAVAILABLE", "JSON 中没有文档 content")
+
+
+def record_field_map(path: Path) -> dict[str, Any]:
+    for root in read_response_values(path):
+        for value in walk_values(root):
+            if not isinstance(value, dict):
+                continue
+            fields = value.get("fields")
+            data = value.get("data")
+            if isinstance(fields, list) and fields and all(isinstance(item, str) for item in fields) and isinstance(data, list) and data:
+                row = data[0]
+                if isinstance(row, list) and len(row) == len(fields):
+                    return dict(zip(fields, row))
+    raise ReportError("BASE_READBACK_INVALID", "Base 读回中没有完整字段行")
+
+
+def normalize_date(value: str) -> str:
+    match = re.search(r"\d{4}-\d{2}-\d{2}", value)
+    return match.group(0) if match else value.strip()
+
+
+def normalize_url(value: str) -> str:
+    match = re.search(r"https://[^\s)]+", value)
+    return match.group(0) if match else value.strip()
+
+
+def comparable(field: str, value: Any) -> Any:
+    text = scalarish(value)
+    if field == BASE_FIELD_NAMES["filing_date"]:
+        return normalize_date(text)
+    if field == "AI分析结果":
+        return normalize_url(text)
+    if field == "材料处理基线" and text:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    return text
+
+
+def build_writeback(
+    runtime: dict[str, Any], facts: dict[str, Any], manifest: dict[str, Any], document_token: str,
+    report_url: str, schema: dict[str, Any], record_values: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    record_id = scalarish(runtime.get("record_id"))
+    dispatch_id = scalarish(runtime.get("dispatch_id"))
+    mode = scalarish(runtime.get("mode"))
+    if not record_id or not dispatch_id or mode not in {"initial", "supplement"}:
+        raise ReportError("INVALID_RUNTIME_INPUT", "运行信封缺少 record_id、dispatch_id 或 mode")
+    attachment_ids = runtime.get("attachment_ids")
+    if not isinstance(attachment_ids, list) or not all(isinstance(item, str) and item for item in attachment_ids):
+        raise ReportError("INVALID_RUNTIME_INPUT", "运行信封 attachment_ids 不合法")
+    top_items = manifest.get("items")
+    expected_downloads = attachment_ids
+    if not isinstance(expected_downloads, list) or not isinstance(top_items, list) or len(top_items) != len(expected_downloads):
+        raise ReportError("MATERIAL_DOWNLOAD_INCOMPLETE", "下载的顶层附件数与运行信封不一致")
+    base_fields = facts["base_fields"]
+    patch: dict[str, Any] = {}
+    for key in BASE_FIELD_KEYS:
+        value = scalar_text(base_fields.get(key), f"base_fields.{key}")
+        field_name = BASE_FIELD_NAMES[key]
+        if mode == "supplement" and not value and record_values is not None:
+            value = scalarish(record_values.get(field_name))
+        patch[field_name] = f"{normalize_date(value)} 00:00:00" if key == "filing_date" and value else (value or None)
+    title = scalar_text(facts["scalars"].get("document_title"), "scalars.document_title") or f"{facts['scalars']['case_number']} 诉讼/仲裁案件材料梳理报告"
+    baseline = {
+        "document_token": document_token,
+        "processed_attachment_ids": sorted(set(attachment_ids)),
+        "contract_version": schema["schema_version"],
+    }
+    patch.update({
+        "AI分析结果": f"[{title}]({report_url})",
+        "材料处理基线": json.dumps(baseline, ensure_ascii=False, separators=(",", ":")),
+        "AI处理状态": "已完成",
+        "执行日志/失败原因": f"任务 {dispatch_id}：已完成",
+    })
+    return {"record_id_list": [record_id], "patch": patch}, {"record_id": record_id, "fields": patch}
+
+
+def build_failure(runtime: dict[str, Any], error_code: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    record_id = scalarish(runtime.get("record_id"))
+    dispatch_id = scalarish(runtime.get("dispatch_id"))
+    mode = scalarish(runtime.get("mode"))
+    if not record_id or not dispatch_id or mode not in {"initial", "supplement"} or not error_code:
+        raise ReportError("INVALID_RUNTIME_INPUT", "无法构建失败回写")
+    patch: dict[str, Any] = {
+        "AI处理状态": "分析失败",
+        "执行日志/失败原因": f"任务 {dispatch_id}：失败：{error_code}",
+    }
+    if mode == "initial":
+        patch["AI分析结果"] = None
+        patch["材料处理基线"] = None
+    return {"record_id_list": [record_id], "patch": patch}, {"record_id": record_id, "fields": patch}
+
+
+def validate_writeback(readback: Path, expectation: dict[str, Any]) -> dict[str, Any]:
+    actual = record_field_map(readback)
+    expected = expectation.get("fields")
+    if not isinstance(expected, dict):
+        raise ReportError("WRITEBACK_EXPECTATION_INVALID", "回写期望值缺少 fields")
+    mismatches: dict[str, Any] = {}
+    for field, value in expected.items():
+        expected_value = comparable(field, value)
+        actual_value = comparable(field, actual.get(field))
+        if expected_value != actual_value:
+            mismatches[field] = {"expected": expected_value, "actual": actual_value}
+    if mismatches:
+        raise ReportError("BASE_WRITEBACK_VERIFY_FAILED", "Base 同记录回写读回不一致", {"mismatches": mismatches})
+    return {"status": "valid", "verified_field_count": len(expected)}
+
+
+def validate_permission(path: Path, member_id: str) -> dict[str, Any]:
+    roots = read_response_values(path)
+    strings: list[str] = []
+    for root in roots:
+        for value in walk_values(root):
+            if isinstance(value, (str, int, float, bool)):
+                strings.append(str(value))
+    if member_id not in strings or "full_access" not in strings:
+        raise ReportError(
+            "DOC_PERMISSION_GRANT_FAILED", "权限添加响应未返回目标上传人和 full_access",
+            {"member_id_found": member_id in strings, "full_access_found": "full_access" in strings},
+        )
+    return {"status": "valid", "member_id": member_id, "permission": "full_access"}
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -379,22 +704,44 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Render and validate the fixed dispute report XML.")
+    parser = argparse.ArgumentParser(description="Build, render and verify a dispute report.")
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    render = subparsers.add_parser("render", help="Render facts into the fixed XML template")
-    render.add_argument("--facts", type=Path, required=True)
-    render.add_argument("--output", type=Path, required=True)
-
-    validate = subparsers.add_parser("validate", help="Validate local XML or lark-cli fetch JSON")
-    validate.add_argument("--input", type=Path, required=True)
-    validate.add_argument("--facts", type=Path)
-
-    evidence = subparsers.add_parser("validate-facts", help="Validate facts against extracted material text")
+    scaffold = subparsers.add_parser("scaffold")
+    scaffold.add_argument("--case-number", required=True)
+    scaffold.add_argument("--manifest", type=Path, required=True)
+    scaffold.add_argument("--output", type=Path, required=True)
+    evidence = subparsers.add_parser("validate-facts")
     evidence.add_argument("--facts", type=Path, required=True)
     evidence.add_argument("--source-corpus", type=Path, required=True)
+    evidence.add_argument("--manifest", type=Path, required=True)
+    render = subparsers.add_parser("render")
+    render.add_argument("--facts", type=Path, required=True)
+    render.add_argument("--output", type=Path, required=True)
+    validate = subparsers.add_parser("validate")
+    validate.add_argument("--input", type=Path, required=True)
+    validate.add_argument("--facts", type=Path)
+    writeback = subparsers.add_parser("build-writeback")
+    writeback.add_argument("--runtime", type=Path, required=True)
+    writeback.add_argument("--facts", type=Path, required=True)
+    writeback.add_argument("--manifest", type=Path, required=True)
+    writeback.add_argument("--document-token", required=True)
+    writeback.add_argument("--report-url", required=True)
+    writeback.add_argument("--record-readback", type=Path)
+    writeback.add_argument("--output", type=Path, required=True)
+    writeback.add_argument("--expectation", type=Path, required=True)
+    failure = subparsers.add_parser("build-failure")
+    failure.add_argument("--runtime", type=Path, required=True)
+    failure.add_argument("--error-code", required=True)
+    failure.add_argument("--output", type=Path, required=True)
+    failure.add_argument("--expectation", type=Path, required=True)
+    verify_writeback = subparsers.add_parser("validate-writeback")
+    verify_writeback.add_argument("--input", type=Path, required=True)
+    verify_writeback.add_argument("--expectation", type=Path, required=True)
+    permission = subparsers.add_parser("validate-permission")
+    permission.add_argument("--input", type=Path, required=True)
+    permission.add_argument("--member-id", required=True)
     return parser
 
 
@@ -402,27 +749,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         template, schema = load_contract(args.template, args.schema)
-        if args.command == "render":
-            facts = read_json(args.facts)
-            output = render_report(facts, template, schema)
-            atomic_write(args.output, output)
-            result = validate_report(output, template, schema, facts)
-            result.update({"output": str(args.output.expanduser().resolve()), "bytes": len(output.encode("utf-8"))})
-        elif args.command == "validate":
-            source = extract_document_content(args.input)
-            facts = read_json(args.facts) if args.facts else None
-            result = validate_report(source, template, schema, facts)
-            result["input"] = str(args.input.expanduser().resolve())
-        else:
-            facts = read_json(args.facts)
+        if args.command == "scaffold":
+            manifest = read_json(args.manifest)
+            result = build_scaffold(args.case_number.strip(), manifest, template, schema)
+            atomic_write(args.output, json.dumps(result, ensure_ascii=False, indent=2))
+            output: dict[str, Any] = {"status": "created", "output": str(args.output.resolve()), "material_count": len(manifest_entries(manifest))}
+        elif args.command == "validate-facts":
             try:
-                source_corpus = args.source_corpus.read_text(encoding="utf-8")
+                corpus = args.source_corpus.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ReportError("SOURCE_CORPUS_UNAVAILABLE", "无法读取材料文本或 OCR 汇总", {"reason": str(exc)}) from exc
-            result = validate_fact_evidence(facts, schema, source_corpus)
-            result["facts"] = str(args.facts.expanduser().resolve())
-            result["source_corpus"] = str(args.source_corpus.expanduser().resolve())
-        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+            output = validate_fact_evidence(read_json(args.facts), template, schema, corpus, read_json(args.manifest))
+        elif args.command == "render":
+            facts = read_json(args.facts)
+            rendered = render_report(facts, template, schema)
+            atomic_write(args.output, rendered)
+            output = validate_report(rendered, template, schema, facts)
+            output.update({"output": str(args.output.resolve()), "bytes": len(rendered.encode("utf-8"))})
+        elif args.command == "validate":
+            facts = read_json(args.facts) if args.facts else None
+            output = validate_report(extract_document_content(args.input), template, schema, facts)
+            output["input"] = str(args.input.resolve())
+        elif args.command == "build-writeback":
+            record_values = record_field_map(args.record_readback) if args.record_readback else None
+            update, expectation = build_writeback(
+                read_json(args.runtime), read_json(args.facts), read_json(args.manifest),
+                args.document_token.strip(), args.report_url.strip(), schema, record_values,
+            )
+            atomic_write(args.output, json.dumps(update, ensure_ascii=False, separators=(",", ":")))
+            atomic_write(args.expectation, json.dumps(expectation, ensure_ascii=False, indent=2))
+            output = {"status": "created", "output": str(args.output.resolve()), "expectation": str(args.expectation.resolve())}
+        elif args.command == "build-failure":
+            update, expectation = build_failure(read_json(args.runtime), args.error_code.strip())
+            atomic_write(args.output, json.dumps(update, ensure_ascii=False, separators=(",", ":")))
+            atomic_write(args.expectation, json.dumps(expectation, ensure_ascii=False, indent=2))
+            output = {"status": "created", "output": str(args.output.resolve()), "expectation": str(args.expectation.resolve())}
+        elif args.command == "validate-writeback":
+            output = validate_writeback(args.input, read_json(args.expectation))
+        else:
+            output = validate_permission(args.input, args.member_id.strip())
+        print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
         return 0
     except ReportError as exc:
         print(json.dumps({"status": "invalid", "error_code": exc.code, "message": str(exc), "details": exc.details}, ensure_ascii=False, separators=(",", ":")), file=sys.stderr)

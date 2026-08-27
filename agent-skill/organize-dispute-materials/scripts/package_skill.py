@@ -23,6 +23,7 @@ PACKAGE_MEMBERS = (
     "references/render-contract.md",
     "references/render-schema.json",
     "references/report-template.xml",
+    "scripts/material_tool.py",
     "scripts/report_tool.py",
 )
 

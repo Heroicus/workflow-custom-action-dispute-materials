@@ -6,7 +6,7 @@
 - `render-schema.json`：动态行字段、结构数量和禁用文本；
 - `scripts/report_tool.py`：唯一渲染和校验入口。
 
-运行时只生成 `case-facts.json`，不得生成或修改模板代码。
+运行时先由 `report_tool.py scaffold` 生成完整 `case-facts.json`，再填入原文事实。
 
 ## `case-facts.json`
 
@@ -20,14 +20,22 @@
   "rows": {
     "request_rows": [],
     "timeline_rows": [],
-    "evidence_rows": []
+    "evidence_rows": [],
+    "completeness_rows": [],
+    "quality_rows": []
+  },
+  "base_fields": {
+    "case_name": "",
+    "case_type": "",
+    "filing_date": "",
+    "case_status": ""
   }
 }
 ```
 
 ### 标量
 
-`report-template.xml` 中全部 `{{name}}` 都是可用标量名。除 `case_number` 外，缺少或空值统一渲染为空单元格。金额字段保持材料原值：
+`report-template.xml` 中全部 `{{name}}` 都是可用标量名。脚手架必须保留全部标量；除 `case_number` 外，空值统一渲染为空单元格。金额字段保持材料原值：
 
 ```text
 principal_*        本金或退款
@@ -49,6 +57,7 @@ total_*            合计
 
 - 当前记录字段和附件正文是唯一事实来源；
 - Base 案件编号可直接写入，其他业务内容须有附件依据；
+- 证据清单和材料完整性表必须保留脚手架中的全部文件项；
 - 原文明确的事实、主张、意见和法律条文可以转写；
 - 无依据内容留空，不用解释性占位词；
 - 冲突信息保留两份原文，不替材料作结论；
@@ -61,6 +70,9 @@ total_*            合计
 ```text
 章节与表格的数量、标题、表头和顺序
 案件编号存在于文档标题
+完整的 118 个标量、21 类动态行和 4 个 Base 回写字段
+姓名、机构、案号和数字均有原文支持
+原文明确出现的当事人、请求、争议、程序和裁判结果已进入对应章节
 全部结构化事实已写入文档
 无残留模板标记和禁用占位词
 ```

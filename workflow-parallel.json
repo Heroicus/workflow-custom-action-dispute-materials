@@ -1,6 +1,6 @@
 {
   "name": "案件材料处理自动化",
-  "component": "6.1.2-evidence-gated-renderer",
+  "component": "6.2.0-complete-report",
   "common_action": {
     "component_block_type_id": "blk_6a7e783b4b408cb2ed5d02ca",
     "form_mapping": {

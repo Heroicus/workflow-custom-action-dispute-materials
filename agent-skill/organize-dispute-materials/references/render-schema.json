@@ -1,5 +1,5 @@
 {
-  "schema_version": "6.1.1",
+  "schema_version": "6.2.0",
   "template": "report-template.xml",
   "required_scalars": [
     "case_number"
@@ -40,6 +40,7 @@
     "precedent_rows": ["index", "case_number", "court", "holding", "applicability"],
     "todo_rows": ["index", "explicit_todo", "related_section", "owner", "deadline", "status"],
     "completeness_rows": ["index", "source_check_item", "available", "source_note"],
-    "conflict_rows": ["index", "matter", "source_a", "source_b", "existing_resolution"]
+    "conflict_rows": ["index", "matter", "source_a", "source_b", "existing_resolution"],
+    "quality_rows": ["index", "check", "result"]
   }
 }

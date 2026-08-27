@@ -13,7 +13,7 @@ record_id = 运行信封中的 record_id
 ## 执行链
 
 ```text
-读取指定附件
+一次读取当前记录全部附件
 → 形成来源明确的结构化事实
 → report_tool.py 用固定 XML 模板渲染并本地校验
 → 一次创建或全文重写后进行远端读回校验
@@ -56,11 +56,11 @@ Base 精确读写
 
 ## 成功边界
 
-只有以下事实均已读回确认才算完成：
+只有以下成功门均通过才算完成：
 
 - 报告通过 `report_tool.py` 的本地与远端读回校验；
-- 上传人 full_access 已从协作者列表读回；
-- 报告 URL、材料基线和最终状态写回同一 `record_id`。
+- 权限添加响应精确返回上传人 open_id 和 `full_access`；
+- 四个案件业务字段、报告 URL、材料基线、AI 状态和执行日志已从同一 `record_id` 读回。
 
 小组件返回 `accepted` 只表示 Agent 会话创建成功。
 
@@ -69,5 +69,4 @@ Base 精确读写
 ```text
 drive:drive
 docs:permission.member:create
-docs:permission.member:retrieve
 ```
