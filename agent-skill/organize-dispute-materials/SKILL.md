@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.3.0"
+  version: "6.4.1"
   tier: STANDARD
   category: legal-automation
 ---
@@ -12,14 +12,14 @@ metadata:
 
 ## 输入
 
-只接受 `dispute-material-run/v6.3` JSON：
+只接受 `dispute-material-run/v6.4` JSON：
 
 ```text
 operation = process_target_record
-required_skill_version = 6.3.0
+required_skill_version = 6.4.1
 app_token、table_id、record_id、dispatch_id、case_number 非空
 mode = initial | supplement
-model_contract = Deepseek-V4-Pro 主写入 + Doubao-Seed-2.1-turbo 只读视觉
+model_contract = Deepseek-V4-Pro 主写入 + Doubao-Seed-2.1-turbo 只读视觉 + Feishu Minutes 音频逐字稿
 ```
 
 `record_id` 是唯一定位键。保存完整信封为 `runtime.json`；不搜索其他记录。
@@ -33,7 +33,8 @@ lark-cli base +record-get --as user \
   --base-token "$app_token" --table-id "$table_id" \
   --record-id "$record_id" --format json > record-readback.json
 
-mkdir -p materials extracted/text extracted/vision-pages extracted/vision-results
+mkdir -p materials extracted/text extracted/vision-pages extracted/vision-results \
+  extracted/audio-files extracted/audio-receipts extracted/audio-transcripts
 lark-cli base +record-download-attachment --as user \
   --base-token "$app_token" --table-id "$table_id" \
   --record-id "$record_id" --output materials --overwrite \
@@ -45,10 +46,12 @@ python3 "$SKILL_ROOT/scripts/material_tool.py" extract \
   --manifest extracted/material-manifest.json \
   --corpus extracted/source-corpus.txt \
   --vision-dir extracted/vision-pages \
-  --vision-tasks extracted/vision-tasks.json
+  --vision-tasks extracted/vision-tasks.json \
+  --audio-dir extracted/audio-files \
+  --audio-tasks extracted/audio-tasks.json
 ```
 
-初次与补充处理都读取当前记录的全部附件，确保重写报告时不丢失旧事实。图片和无文本层 PDF 先以 Tesseract OCR，PDF 页固定按 300 DPI 渲染；ZIP 逐文件展开。所有独立图片、无文字层 PDF 页面和 Office 嵌入图片同时形成 `vision-task/v1` 任务。
+初次与补充处理都读取当前记录的全部附件，确保重写报告时不丢失旧事实。图片和无文本层 PDF 先以 Tesseract OCR，PDF 页固定按 300 DPI 渲染；ZIP 逐文件展开。所有独立图片、无文字层 PDF 页面和 Office 嵌入图片形成 `vision-task/v1`；`wav/mp3/m4a/aac/ogg/wma/amr` 及非空 `.m4a.larkcache` 形成 `audio-task/v1`。
 
 ### 2. 调用只读视觉子智能体
 
@@ -67,13 +70,36 @@ python3 "$SKILL_ROOT/scripts/vision_tool.py" reconcile \
   --tasks extracted/vision-tasks.json \
   --results-dir extracted/vision-results \
   --source-corpus extracted/source-corpus.txt \
-  --output-corpus extracted/verified-source-corpus.txt \
+  --output-corpus extracted/vision-source-corpus.txt \
   --evidence extracted/vision-evidence.json
 ```
 
 没有视觉任务时也必须运行该命令，它会生成零任务证据包并复制语料。缺少子智能体结果、哈希不一致、模型不符或仍有看不清的关键字段时立即失败；主智能体不得猜测或绕过。
 
-### 3. 填写完整事实脚手架
+### 3. 生成并读回音频逐字稿
+
+音频固定走用户身份的飞书妙记，不调用视觉子智能体，不使用本地 Whisper，也不得用妙记 Summary、Todo、Chapter 或 Keyword 代替逐字稿：
+
+```bash
+python3 "$SKILL_ROOT/scripts/audio_tool.py" transcribe \
+  --tasks extracted/audio-tasks.json \
+  --receipts-dir extracted/audio-receipts \
+  --transcripts-dir extracted/audio-transcripts
+
+python3 "$SKILL_ROOT/scripts/audio_tool.py" reconcile \
+  --tasks extracted/audio-tasks.json \
+  --receipts-dir extracted/audio-receipts \
+  --transcripts-dir extracted/audio-transcripts \
+  --source-corpus extracted/vision-source-corpus.txt \
+  --output-corpus extracted/verified-source-corpus.txt \
+  --evidence extracted/audio-evidence.json
+```
+
+`transcribe` 实际执行 `drive +upload → minutes +upload → minutes +detail --transcript`，并轮询最多 2 小时。只在同一次本地运行中按音频哈希去重；已有本地回执也必须重新远端读回逐字稿。Base 中的 `audio_minutes` 仅用于审计，不作为跨运行可信输入，补充处理会重新上传当前附件，避免被编辑的基线把无关妙记绑定到案件音频。没有音频任务时两个命令也必须执行，它们会生成零任务证据包并逐字节复制视觉语料。
+
+输出契约见 `references/audio-contract.md` 和 `references/audio-result-schema.json`。音频缺失、超过 6GB、权限不足、转写超时、逐字稿为空、远端响应或逐字稿哈希不一致时立即失败。
+
+### 4. 填写完整事实脚手架
 
 ```bash
 python3 "$SKILL_ROOT/scripts/report_tool.py" scaffold \
@@ -96,14 +122,30 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" scaffold \
 python3 "$SKILL_ROOT/scripts/report_tool.py" validate-facts \
   --facts case-facts.json \
   --source-corpus extracted/verified-source-corpus.txt \
+  --vision-corpus extracted/vision-source-corpus.txt \
   --manifest extracted/material-manifest.json \
   --vision-evidence extracted/vision-evidence.json \
-  --vision-tasks extracted/vision-tasks.json
+  --vision-tasks extracted/vision-tasks.json \
+  --audio-evidence extracted/audio-evidence.json \
+  --audio-tasks extracted/audio-tasks.json \
+  --audio-receipts-dir extracted/audio-receipts \
+  --audio-transcripts-dir extracted/audio-transcripts
 ```
 
 非零退出时修正事实；不放宽或跳过校验。
 
-### 4. 渲染和创建文档
+### 5. 渲染和创建文档
+
+文档写入前重新读取同一记录并确认 `AI处理状态=分析中` 且执行日志仍包含当前 `dispatch_id`；任务已被接管时不得继续：
+
+```bash
+lark-cli base +record-get --as user \
+  --base-token "$app_token" --table-id "$table_id" \
+  --record-id "$record_id" --format json > record-pre-document.json
+
+python3 "$SKILL_ROOT/scripts/report_tool.py" validate-dispatch \
+  --runtime runtime.json --record-readback record-pre-document.json
+```
 
 ```bash
 python3 "$SKILL_ROOT/scripts/report_tool.py" render \
@@ -127,7 +169,7 @@ lark-cli docs +update --as user \
 
 补充处理保留原 document token 和 URL，不创建第二份报告。
 
-### 5. 文档读回
+### 6. 文档读回
 
 ```bash
 lark-cli docs +fetch --as user \
@@ -139,7 +181,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate \
 
 失败时只允许用同一 `report.xml` 全文重写一次后重新读回。
 
-### 6. 上传人权限
+### 7. 上传人权限
 
 对每个 `uploader_open_ids` 执行：
 
@@ -155,19 +197,28 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate-permission \
 
 当前运行时不提供协作者列表命令，因此以添加接口返回的精确 open_id 和 `full_access` 作为成功门。
 
-### 7. 回写 Base 并读回
+### 8. 回写 Base 并读回
 
 ```bash
+lark-cli base +record-get --as user \
+  --base-token "$app_token" --table-id "$table_id" \
+  --record-id "$record_id" --format json > record-pre-writeback.json
+
 python3 "$SKILL_ROOT/scripts/report_tool.py" build-writeback \
   --runtime runtime.json \
   --facts case-facts.json \
   --manifest extracted/material-manifest.json \
   --vision-evidence extracted/vision-evidence.json \
   --vision-tasks extracted/vision-tasks.json \
+  --audio-evidence extracted/audio-evidence.json \
+  --audio-tasks extracted/audio-tasks.json \
+  --audio-receipts-dir extracted/audio-receipts \
+  --audio-transcripts-dir extracted/audio-transcripts \
   --source-corpus extracted/verified-source-corpus.txt \
+  --vision-corpus extracted/vision-source-corpus.txt \
   --document-token "$document_token" \
   --report-url "$report_url" \
-  --record-readback record-readback.json \
+  --record-readback record-pre-writeback.json \
   --output base-update.json \
   --expectation base-expectation.json
 
@@ -189,12 +240,17 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate-writeback \
 任一成功门失败时，用原始错误码构建一次失败回写，再读回验证：
 
 ```bash
+lark-cli base +record-get --as user \
+  --base-token "$app_token" --table-id "$table_id" \
+  --record-id "$record_id" --format json > record-pre-failure.json
+
 python3 "$SKILL_ROOT/scripts/report_tool.py" build-failure \
   --runtime runtime.json --error-code "$error_code" \
+  --record-readback record-pre-failure.json \
   --output base-update.json --expectation base-expectation.json
 ```
 
-`initial` 失败清空链接和基线；`supplement` 失败保留原链接和基线。
+`initial` 失败清空链接和基线；`supplement` 失败保留原链接和基线。若当前记录已经不再属于本 `dispatch_id`，不得回写失败状态或覆盖新任务。
 
 ## 返回
 
@@ -204,7 +260,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" build-failure \
 {
   "status": "completed",
   "record_id": "rec...",
-  "dispatch_id": "odm-v63:rec...:...",
+  "dispatch_id": "odm-v64:rec...:...",
   "processing_status": "已完成",
   "report_url": "https://.../docx/...",
   "error_code": ""

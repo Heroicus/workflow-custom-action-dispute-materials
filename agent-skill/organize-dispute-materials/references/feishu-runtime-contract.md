@@ -15,7 +15,9 @@ record_id = 运行信封中的 record_id
 ```text
 一次读取当前记录全部附件
 → Tesseract 与 Doubao-Seed-2.1-turbo 只读视觉子智能体核验图片
-→ vision_tool.py 形成哈希绑定的视觉证据包和最终语料
+→ vision_tool.py 形成哈希绑定的视觉证据包
+→ Feishu Minutes 上传音频并远端读回带时间戳逐字稿
+→ audio_tool.py 形成哈希绑定的音频证据包和最终语料
 → 形成来源明确的结构化事实
 → report_tool.py 用固定 XML 模板渲染并本地校验
 → 一次创建或全文重写后进行远端读回校验
@@ -30,9 +32,10 @@ record_id = 运行信封中的 record_id
 ```text
 Deepseek-V4-Pro         主智能体、唯一事实合并者、唯一业务写入者
 Doubao-Seed-2.1-turbo   纠纷材料视觉核验员，只读图片并返回 vision-evidence/v1
+Feishu Minutes          用户身份远端音频转写，只返回逐字稿和妙记读回证据
 ```
 
-子智能体不得填写事实脚手架、生成报告或调用任何飞书写操作。所有视觉任务和结果必须以任务 ID、原文件哈希和图片哈希绑定；关键字段仍不清楚时本轮失败。
+视觉子智能体和妙记服务不得填写事实脚手架、生成报告或写入 Base。所有视觉与音频任务必须绑定任务 ID、原文件哈希、媒体哈希和远端读回哈希；关键视觉字段仍不清楚、音频逐字稿未生成或内容哈希不一致时本轮失败。妙记 AI 总结不得作为事实来源。
 
 ## 字段契约
 
@@ -48,7 +51,7 @@ Doubao-Seed-2.1-turbo   纠纷材料视觉核验员，只读图片并返回 visi
 | AI处理状态 | 单选 | 分析中 / 已完成 / 分析失败 |
 | AI分析结果 | 文本 | 当前报告 URL |
 | 执行日志/失败原因 | 文本 | 任务状态或错误码 |
-| 材料处理基线 | 文本 | 报告 token、已处理附件 ID 与合同版本 |
+| 材料处理基线 | 文本 | 报告 token、已处理附件 ID、音频妙记映射与合同版本 |
 
 ## 文档能力
 
@@ -57,6 +60,7 @@ Doubao-Seed-2.1-turbo   纠纷材料视觉核验员，只读图片并返回 visi
 ```text
 附件正文读取与图片 OCR
 自定义子智能体调用与图片传递
+用户身份云盘上传、妙记生成与逐字稿读取
 原生 Docx 创建
 同一 Docx 全文重写
 完整文档读回
@@ -72,7 +76,9 @@ Base 精确读写
 
 - 报告通过 `report_tool.py` 的本地与远端读回校验；
 - `vision_tool.py` 已读回并校验全部视觉子任务，关键字段不存在未决项；
+- `audio_tool.py` 已远端读回并校验全部音频逐字稿，证据包与最终语料哈希一致；
 - 权限添加响应精确返回上传人 open_id 和 `full_access`；
+- 文档写入和 Base 回写前均重新读回当前记录，确认 `AI处理状态=分析中` 且执行日志精确等于 `任务 <dispatch_id>：处理中`；
 - 四个案件业务字段、报告 URL、材料基线、AI 状态和执行日志已从同一 `record_id` 读回。
 
 小组件返回 `accepted` 只表示 Agent 会话创建成功。
@@ -81,5 +87,9 @@ Base 精确读写
 
 ```text
 drive:drive
+drive:file:upload
+minutes:minutes.upload:write
+minutes:minutes.basic:read
+minutes:minutes.artifacts:read
 docs:permission.member:create
 ```

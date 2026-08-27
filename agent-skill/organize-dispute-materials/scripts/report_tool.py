@@ -39,6 +39,7 @@ EXACT_SOURCE_SCALARS = {
 }
 NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v1"
+AUDIO_PACK_SCHEMA = "audio-evidence-pack/v1"
 
 
 class ReportError(Exception):
@@ -67,7 +68,7 @@ def sha256_file(path: Path) -> str:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError as exc:
-        raise ReportError("VISION_TASKS_UNAVAILABLE", f"无法读取视觉任务清单：{path}", {"reason": str(exc)}) from exc
+        raise ReportError("ARTIFACT_UNAVAILABLE", f"无法读取工件：{path}", {"reason": str(exc)}) from exc
     return digest.hexdigest()
 
 
@@ -406,7 +407,7 @@ def evidence_type(name: str) -> str:
         return "表格"
     if suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
         return "图片"
-    if suffix in {".m4a", ".mp3", ".wav", ".aac"}:
+    if suffix in {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".wma", ".amr"}:
         return "音频"
     return "文件"
 
@@ -560,6 +561,223 @@ def validate_vision_evidence(
     return {"vision_expected": expected, "vision_received": received, "vision_ocr_disagreements": summary.get("ocr_disagreements", 0)}
 
 
+def response_keyed_texts(value: Any, key: str) -> set[str]:
+    return {
+        scalarish(item.get(key)) for item in walk_values(value)
+        if isinstance(item, dict) and scalarish(item.get(key))
+    }
+
+
+def saved_audio_response(path: Path, expected_hash: str, label: str) -> dict[str, Any]:
+    if not path.is_file() or sha256_file(path) != expected_hash:
+        raise ReportError("AUDIO_REMOTE_READBACK_CHANGED", f"{label}响应不存在或哈希不一致")
+    roots = read_response_values(path)
+    response = next((item for item in reversed(roots) if isinstance(item, dict)), None)
+    if not isinstance(response, dict) or response.get("ok") is not True or response.get("identity") != "user":
+        raise ReportError("AUDIO_REMOTE_READBACK_INVALID", f"{label}响应不是用户身份成功结果")
+    return response
+
+
+def audio_path_from_response(value: str, cwd: Path, allowed_root: Path) -> Path | None:
+    candidate = Path(value).expanduser()
+    candidate = (cwd / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    try:
+        candidate.relative_to(allowed_root.resolve())
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def validate_audio_remote_artifacts(
+    item: dict[str, Any], receipts_dir: Path, transcripts_dir: Path, transcript: Path,
+) -> None:
+    task_id = scalarish(item.get("task_id"))
+    file_token = scalarish(item.get("file_token"))
+    minute_token = scalarish(item.get("minute_token"))
+    minute_url = scalarish(item.get("minute_url"))
+    remote = item.get("remote_readback")
+    required_hashes = {
+        "drive_upload_response_sha256", "minute_upload_response_sha256", "minute_detail_response_sha256",
+    }
+    if not isinstance(remote, dict) or set(remote) != required_hashes or any(
+        not re.fullmatch(r"[0-9a-f]{64}", scalarish(remote.get(key))) for key in required_hashes
+    ):
+        raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据缺少完整远端响应哈希", {"task_id": task_id})
+
+    raw_dir = receipts_dir.resolve() / "raw"
+    drive = saved_audio_response(
+        raw_dir / f"{task_id}.drive.json", scalarish(remote["drive_upload_response_sha256"]), "云空间上传",
+    )
+    if response_keyed_texts(drive, "file_token") != {file_token}:
+        raise ReportError("AUDIO_REMOTE_READBACK_INVALID", "云空间响应与音频回执 file_token 不一致", {"task_id": task_id})
+
+    minute = saved_audio_response(
+        raw_dir / f"{task_id}.minute.json", scalarish(remote["minute_upload_response_sha256"]), "妙记生成",
+    )
+    if response_keyed_texts(minute, "minute_token") != {minute_token}:
+        raise ReportError("AUDIO_REMOTE_READBACK_INVALID", "妙记生成响应与音频回执 token 不一致", {"task_id": task_id})
+    response_urls = response_keyed_texts(minute, "minute_url") or response_keyed_texts(minute, "url")
+    if (response_urls and response_urls != {minute_url}) or (not response_urls and minute_url):
+        raise ReportError("AUDIO_REMOTE_READBACK_INVALID", "妙记生成响应 URL 与音频回执不一致", {"task_id": task_id})
+
+    detail = saved_audio_response(
+        raw_dir / f"{task_id}.detail.json", scalarish(remote["minute_detail_response_sha256"]), "妙记逐字稿读回",
+    )
+    minute_items = [
+        value for value in walk_values(detail)
+        if isinstance(value, dict) and scalarish(value.get("minute_token"))
+    ]
+    if {scalarish(value.get("minute_token")) for value in minute_items} != {minute_token}:
+        raise ReportError("AUDIO_REMOTE_READBACK_INVALID", "逐字稿响应未唯一绑定目标妙记", {"task_id": task_id})
+    target_items = [value for value in minute_items if scalarish(value.get("minute_token")) == minute_token]
+    if any(value.get("error") not in (None, "", False, {}, []) for value in target_items):
+        raise ReportError("AUDIO_REMOTE_READBACK_INVALID", "目标妙记的逐字稿响应仍包含错误", {"task_id": task_id})
+    cwd = transcripts_dir.resolve().parent
+    remote_paths = {
+        path.resolve()
+        for target in target_items
+        for value in walk_values(target)
+        if isinstance(value, dict) and isinstance(value.get("transcript_file"), str)
+        for path in [audio_path_from_response(value["transcript_file"], cwd, transcripts_dir)]
+        if path is not None
+    }
+    if remote_paths != {transcript.resolve()}:
+        raise ReportError("AUDIO_REMOTE_READBACK_INVALID", "逐字稿远端路径与音频回执不一致", {"task_id": task_id})
+
+
+def validate_audio_evidence(
+    evidence: dict[str, Any], source_corpus: str | None = None,
+    input_corpus: str | None = None, audio_tasks: dict[str, Any] | None = None,
+    audio_tasks_sha256: str | None = None, receipts_dir: Path | None = None,
+    transcripts_dir: Path | None = None,
+) -> dict[str, Any]:
+    if evidence.get("schema_version") != AUDIO_PACK_SCHEMA:
+        raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据包版本不正确")
+    policy = evidence.get("policy")
+    summary = evidence.get("summary")
+    tasks = evidence.get("tasks")
+    unresolved = evidence.get("unresolved")
+    artifacts = evidence.get("artifacts")
+    if (
+        policy != {
+            "provider": "Feishu Minutes",
+            "identity": "user",
+            "remote_transcript_readback": True,
+            "main_writer": "Deepseek-V4-Pro",
+            "single_writer": True,
+        }
+        or not isinstance(summary, dict)
+        or not isinstance(tasks, list)
+        or not isinstance(unresolved, list)
+        or not isinstance(artifacts, dict)
+    ):
+        raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据包结构或单写入策略不正确")
+    expected = summary.get("expected")
+    received = summary.get("received")
+    complete = summary.get("complete")
+    failed = summary.get("failed")
+    reused = summary.get("reused")
+    if not all(type(value) is int and value >= 0 for value in (expected, received, complete, failed, reused)):
+        raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据包统计值不合法")
+    if expected != received or received != complete or received != len(tasks) or failed or unresolved:
+        raise ReportError(
+            "AUDIO_EVIDENCE_INCOMPLETE", "音频逐字稿未全部完成远端读回",
+            {"expected": expected, "received": received, "complete": complete, "failed": failed},
+        )
+    task_map: dict[str, tuple[str, str]] = {}
+    transcript_missing: list[str] = []
+    corpus_key = source_key(source_corpus or "")
+    if tasks and (receipts_dir is None or transcripts_dir is None):
+        raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据校验缺少回执或逐字稿根目录")
+    for item in tasks:
+        if not isinstance(item, dict):
+            raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据任务必须是对象")
+        task_id = scalarish(item.get("task_id"))
+        source_hash = scalarish(item.get("source_sha256"))
+        media_hash = scalarish(item.get("media_sha256"))
+        file_token = scalarish(item.get("file_token"))
+        minute_token = scalarish(item.get("minute_token"))
+        minute_url = scalarish(item.get("minute_url"))
+        transcript_hash = scalarish(item.get("transcript_sha256"))
+        provider = item.get("provider")
+        if (
+            not re.fullmatch(r"aud_[0-9a-f]{20}", task_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
+            or not re.fullmatch(r"[0-9a-f]{64}", media_hash)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{4,256}", file_token)
+            or not re.fullmatch(r"[a-z0-9]{8,128}", minute_token)
+            or (minute_url and not re.fullmatch(rf"https://[^\s]+/minutes/{re.escape(minute_token)}(?:[/?#].*)?", minute_url))
+            or not re.fullmatch(r"[0-9a-f]{64}", transcript_hash)
+            or item.get("status") != "complete"
+            or provider != {"service": "Feishu Minutes", "identity": "user", "mode": "remote_transcript_readback"}
+        ):
+            raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据身份、哈希、妙记或状态不正确", {"task_id": task_id})
+        if task_id in task_map:
+            raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据任务 ID 重复", {"task_id": task_id})
+        transcript = Path(scalarish(item.get("transcript_path"))).resolve()
+        try:
+            transcript.relative_to(transcripts_dir.resolve() if transcripts_dir is not None else Path("/__invalid__"))
+        except ValueError as exc:
+            raise ReportError("AUDIO_EVIDENCE_INVALID", "音频逐字稿路径不在本次输出目录", {"task_id": task_id}) from exc
+        if not transcript.is_file() or sha256_file(transcript) != transcript_hash:
+            raise ReportError("AUDIO_TRANSCRIPT_CHANGED", "音频逐字稿不存在或哈希不一致", {"task_id": task_id})
+        transcript_text = transcript.read_text(encoding="utf-8", errors="replace")
+        if source_corpus is not None and source_key(transcript_text) not in corpus_key:
+            transcript_missing.append(task_id)
+        validate_audio_remote_artifacts(item, receipts_dir, transcripts_dir, transcript)  # type: ignore[arg-type]
+        task_map[task_id] = (source_hash, media_hash)
+    if transcript_missing:
+        raise ReportError("AUDIO_CORPUS_MISMATCH", "音频逐字稿未进入最终材料语料", {"task_ids": transcript_missing[:20]})
+    required_artifacts = {"audio_tasks_sha256", "input_corpus_sha256", "verified_corpus_sha256"}
+    if set(artifacts) != required_artifacts or any(
+        value is not None and not re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in artifacts.values()
+    ):
+        raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据包工件哈希不正确")
+    if input_corpus is not None and artifacts.get("input_corpus_sha256") != hashlib.sha256(input_corpus.encode("utf-8")).hexdigest():
+        raise ReportError("AUDIO_CORPUS_MISMATCH", "音频证据输入语料不是本次视觉核验语料")
+    if source_corpus is not None and artifacts.get("verified_corpus_sha256") != hashlib.sha256(source_corpus.encode("utf-8")).hexdigest():
+        raise ReportError("AUDIO_CORPUS_MISMATCH", "最终材料语料哈希与音频证据包不一致")
+    if audio_tasks is not None:
+        raw_expected_tasks = audio_tasks.get("tasks")
+        if audio_tasks.get("schema_version") != "audio-task/v1" or not isinstance(raw_expected_tasks, list):
+            raise ReportError("AUDIO_TASKS_INVALID", "音频任务清单版本或结构不正确")
+        expected_map: dict[str, tuple[str, str]] = {}
+        for item in raw_expected_tasks:
+            if not isinstance(item, dict):
+                raise ReportError("AUDIO_TASKS_INVALID", "音频任务必须是对象")
+            task_id = scalarish(item.get("task_id"))
+            if not task_id or task_id in expected_map:
+                raise ReportError("AUDIO_TASKS_INVALID", "音频任务 ID 缺失或重复", {"task_id": task_id})
+            expected_map[task_id] = (scalarish(item.get("source_sha256")), scalarish(item.get("media_sha256")))
+        if expected_map != task_map or expected != len(expected_map):
+            raise ReportError("AUDIO_EVIDENCE_MISMATCH", "音频证据与本次任务清单不一致")
+    if audio_tasks_sha256 is not None and artifacts.get("audio_tasks_sha256") != audio_tasks_sha256:
+        raise ReportError("AUDIO_EVIDENCE_MISMATCH", "音频任务清单文件哈希与证据包不一致")
+    return {"audio_expected": expected, "audio_received": received, "audio_reused": reused}
+
+
+def audio_minutes_baseline(evidence: dict[str, Any]) -> dict[str, dict[str, str]]:
+    values: dict[str, dict[str, str]] = {}
+    tasks = evidence.get("tasks")
+    if not isinstance(tasks, list):
+        raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据包缺少任务")
+    for item in tasks:
+        if not isinstance(item, dict):
+            raise ReportError("AUDIO_EVIDENCE_INVALID", "音频证据任务必须是对象")
+        media_hash = scalarish(item.get("media_sha256"))
+        current = {
+            "file_token": scalarish(item.get("file_token")),
+            "minute_token": scalarish(item.get("minute_token")),
+            "minute_url": scalarish(item.get("minute_url")),
+            "transcript_sha256": scalarish(item.get("transcript_sha256")),
+        }
+        existing = values.get(media_hash)
+        if existing is not None and existing != current:
+            raise ReportError("AUDIO_EVIDENCE_INVALID", "同一音频哈希对应了冲突的妙记结果", {"media_sha256": media_hash})
+        values[media_hash] = current
+    return values
+
+
 def require_source_sections(scalars: dict[str, Any], rows: dict[str, Any], corpus_key: str) -> None:
     missing: list[str] = []
 
@@ -596,12 +814,18 @@ def require_source_sections(scalars: dict[str, Any], rows: dict[str, Any], corpu
 
 def validate_fact_evidence(
     facts: dict[str, Any], template: str, schema: dict[str, Any], source_corpus: str,
-    manifest: dict[str, Any], vision_evidence: dict[str, Any], vision_tasks: dict[str, Any],
-    vision_tasks_sha256: str,
+    vision_corpus: str, manifest: dict[str, Any],
+    vision_evidence: dict[str, Any], vision_tasks: dict[str, Any], vision_tasks_sha256: str,
+    audio_evidence: dict[str, Any], audio_tasks: dict[str, Any], audio_tasks_sha256: str,
+    audio_receipts_dir: Path, audio_transcripts_dir: Path,
 ) -> dict[str, Any]:
     scalars, rows, base_fields = validate_fact_shape(facts, template, schema)
     counts = validate_manifest_coverage(rows, manifest)
-    vision_summary = validate_vision_evidence(vision_evidence, source_corpus, vision_tasks, vision_tasks_sha256)
+    vision_summary = validate_vision_evidence(vision_evidence, vision_corpus, vision_tasks, vision_tasks_sha256)
+    audio_summary = validate_audio_evidence(
+        audio_evidence, source_corpus, vision_corpus, audio_tasks, audio_tasks_sha256,
+        audio_receipts_dir, audio_transcripts_dir,
+    )
     evidence_corpus = "\n".join(
         line for line in source_corpus.splitlines()
         if not line.startswith(("=== ", "--- "))
@@ -643,7 +867,7 @@ def validate_fact_evidence(
     return {
         "status": "valid", "numeric_literal_count": len(literals), "material_count": sum(counts.values()),
         "complete_materials": counts["complete"], "partial_materials": counts["partial"], "failed_materials": counts["failed"],
-        **vision_summary,
+        **vision_summary, **audio_summary,
     }
 
 
@@ -732,17 +956,34 @@ def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
         "vision_agent_name": "纠纷材料视觉核验员",
         "vision_model": "Doubao-Seed-2.1-turbo",
         "vision_result_schema": "vision-evidence/v1",
+        "audio_transcription_service": "Feishu Minutes",
+        "audio_result_schema": "audio-evidence/v1",
         "write_policy": "main_agent_only",
     }
     if not isinstance(contract, dict) or any(contract.get(key) != value for key, value in expected.items()):
         raise ReportError("MODEL_CONTRACT_MISMATCH", "运行信封中的主子模型契约不正确")
 
 
+def validate_dispatch_ownership(runtime: dict[str, Any], record_values: dict[str, Any] | None) -> None:
+    dispatch_id = scalarish(runtime.get("dispatch_id"))
+    if not dispatch_id or record_values is None:
+        raise ReportError("DISPATCH_OWNERSHIP_UNVERIFIED", "缺少当前 Base 记录或任务标识，不能安全回写")
+    status = scalarish(record_values.get("AI处理状态"))
+    log = scalarish(record_values.get("执行日志/失败原因"))
+    if status != "分析中" or log != f"任务 {dispatch_id}：处理中":
+        raise ReportError(
+            "DISPATCH_OWNERSHIP_LOST", "当前任务已不再持有该 Base 记录，拒绝覆盖新任务结果",
+            {"status": status},
+        )
+
+
 def build_writeback(
-    runtime: dict[str, Any], facts: dict[str, Any], manifest: dict[str, Any], document_token: str,
+    runtime: dict[str, Any], facts: dict[str, Any], manifest: dict[str, Any],
+    audio_evidence: dict[str, Any], document_token: str,
     report_url: str, schema: dict[str, Any], record_values: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_runtime_model_contract(runtime)
+    validate_dispatch_ownership(runtime, record_values)
     record_id = scalarish(runtime.get("record_id"))
     dispatch_id = scalarish(runtime.get("dispatch_id"))
     mode = scalarish(runtime.get("mode"))
@@ -768,6 +1009,7 @@ def build_writeback(
         "document_token": document_token,
         "processed_attachment_ids": sorted(set(attachment_ids)),
         "contract_version": schema["schema_version"],
+        "audio_minutes": audio_minutes_baseline(audio_evidence),
     }
     patch.update({
         "AI分析结果": f"[{title}]({report_url})",
@@ -778,7 +1020,10 @@ def build_writeback(
     return {"record_id_list": [record_id], "patch": patch}, {"record_id": record_id, "fields": patch}
 
 
-def build_failure(runtime: dict[str, Any], error_code: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def build_failure(
+    runtime: dict[str, Any], error_code: str, record_values: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    validate_dispatch_ownership(runtime, record_values)
     record_id = scalarish(runtime.get("record_id"))
     dispatch_id = scalarish(runtime.get("dispatch_id"))
     mode = scalarish(runtime.get("mode"))
@@ -846,30 +1091,44 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = subparsers.add_parser("validate-facts")
     evidence.add_argument("--facts", type=Path, required=True)
     evidence.add_argument("--source-corpus", type=Path, required=True)
+    evidence.add_argument("--vision-corpus", type=Path, required=True)
     evidence.add_argument("--manifest", type=Path, required=True)
     evidence.add_argument("--vision-evidence", type=Path, required=True)
     evidence.add_argument("--vision-tasks", type=Path, required=True)
+    evidence.add_argument("--audio-evidence", type=Path, required=True)
+    evidence.add_argument("--audio-tasks", type=Path, required=True)
+    evidence.add_argument("--audio-receipts-dir", type=Path, required=True)
+    evidence.add_argument("--audio-transcripts-dir", type=Path, required=True)
     render = subparsers.add_parser("render")
     render.add_argument("--facts", type=Path, required=True)
     render.add_argument("--output", type=Path, required=True)
     validate = subparsers.add_parser("validate")
     validate.add_argument("--input", type=Path, required=True)
     validate.add_argument("--facts", type=Path)
+    ownership = subparsers.add_parser("validate-dispatch")
+    ownership.add_argument("--runtime", type=Path, required=True)
+    ownership.add_argument("--record-readback", type=Path, required=True)
     writeback = subparsers.add_parser("build-writeback")
     writeback.add_argument("--runtime", type=Path, required=True)
     writeback.add_argument("--facts", type=Path, required=True)
     writeback.add_argument("--manifest", type=Path, required=True)
     writeback.add_argument("--vision-evidence", type=Path, required=True)
     writeback.add_argument("--vision-tasks", type=Path, required=True)
+    writeback.add_argument("--audio-evidence", type=Path, required=True)
+    writeback.add_argument("--audio-tasks", type=Path, required=True)
+    writeback.add_argument("--audio-receipts-dir", type=Path, required=True)
+    writeback.add_argument("--audio-transcripts-dir", type=Path, required=True)
     writeback.add_argument("--source-corpus", type=Path, required=True)
+    writeback.add_argument("--vision-corpus", type=Path, required=True)
     writeback.add_argument("--document-token", required=True)
     writeback.add_argument("--report-url", required=True)
-    writeback.add_argument("--record-readback", type=Path)
+    writeback.add_argument("--record-readback", type=Path, required=True)
     writeback.add_argument("--output", type=Path, required=True)
     writeback.add_argument("--expectation", type=Path, required=True)
     failure = subparsers.add_parser("build-failure")
     failure.add_argument("--runtime", type=Path, required=True)
     failure.add_argument("--error-code", required=True)
+    failure.add_argument("--record-readback", type=Path, required=True)
     failure.add_argument("--output", type=Path, required=True)
     failure.add_argument("--expectation", type=Path, required=True)
     verify_writeback = subparsers.add_parser("validate-writeback")
@@ -893,12 +1152,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "validate-facts":
             try:
                 corpus = args.source_corpus.read_text(encoding="utf-8")
+                vision_corpus = args.vision_corpus.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ReportError("SOURCE_CORPUS_UNAVAILABLE", "无法读取材料文本或 OCR 汇总", {"reason": str(exc)}) from exc
             output = validate_fact_evidence(
-                read_json(args.facts), template, schema, corpus,
+                read_json(args.facts), template, schema, corpus, vision_corpus,
                 read_json(args.manifest), read_json(args.vision_evidence), read_json(args.vision_tasks),
-                sha256_file(args.vision_tasks),
+                sha256_file(args.vision_tasks), read_json(args.audio_evidence), read_json(args.audio_tasks),
+                sha256_file(args.audio_tasks), args.audio_receipts_dir, args.audio_transcripts_dir,
             )
         elif args.command == "render":
             facts = read_json(args.facts)
@@ -910,25 +1171,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             facts = read_json(args.facts) if args.facts else None
             output = validate_report(extract_document_content(args.input), template, schema, facts)
             output["input"] = str(args.input.resolve())
+        elif args.command == "validate-dispatch":
+            runtime = read_json(args.runtime)
+            validate_dispatch_ownership(runtime, record_field_map(args.record_readback))
+            output = {"status": "valid", "dispatch_owner": scalarish(runtime.get("dispatch_id"))}
         elif args.command == "build-writeback":
             try:
                 corpus = args.source_corpus.read_text(encoding="utf-8")
+                vision_corpus = args.vision_corpus.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ReportError("SOURCE_CORPUS_UNAVAILABLE", "无法读取最终材料语料", {"reason": str(exc)}) from exc
             validate_vision_evidence(
-                read_json(args.vision_evidence), corpus, read_json(args.vision_tasks),
+                read_json(args.vision_evidence), vision_corpus, read_json(args.vision_tasks),
                 sha256_file(args.vision_tasks),
             )
-            record_values = record_field_map(args.record_readback) if args.record_readback else None
+            audio_evidence = read_json(args.audio_evidence)
+            validate_audio_evidence(
+                audio_evidence, corpus, vision_corpus, read_json(args.audio_tasks),
+                sha256_file(args.audio_tasks), args.audio_receipts_dir, args.audio_transcripts_dir,
+            )
+            record_values = record_field_map(args.record_readback)
             update, expectation = build_writeback(
                 read_json(args.runtime), read_json(args.facts), read_json(args.manifest),
-                args.document_token.strip(), args.report_url.strip(), schema, record_values,
+                audio_evidence, args.document_token.strip(), args.report_url.strip(), schema, record_values,
             )
             atomic_write(args.output, json.dumps(update, ensure_ascii=False, separators=(",", ":")))
             atomic_write(args.expectation, json.dumps(expectation, ensure_ascii=False, indent=2))
             output = {"status": "created", "output": str(args.output.resolve()), "expectation": str(args.expectation.resolve())}
         elif args.command == "build-failure":
-            update, expectation = build_failure(read_json(args.runtime), args.error_code.strip())
+            update, expectation = build_failure(
+                read_json(args.runtime), args.error_code.strip(), record_field_map(args.record_readback),
+            )
             atomic_write(args.output, json.dumps(update, ensure_ascii=False, separators=(",", ":")))
             atomic_write(args.expectation, json.dumps(expectation, ensure_ascii=False, indent=2))
             output = {"status": "created", "output": str(args.output.resolve()), "expectation": str(args.expectation.resolve())}

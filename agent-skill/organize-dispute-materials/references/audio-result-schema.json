@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audio-evidence/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "source_sha256",
+    "media_sha256",
+    "provider",
+    "status",
+    "file_token",
+    "minute_token",
+    "minute_url",
+    "transcript_path",
+    "transcript_sha256",
+    "transcript_chars",
+    "remote_readback",
+    "reuse_source"
+  ],
+  "properties": {
+    "schema_version": { "const": "audio-evidence/v1" },
+    "task_id": { "type": "string", "pattern": "^aud_[0-9a-f]{20}$" },
+    "source_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "media_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "identity", "mode"],
+      "properties": {
+        "service": { "const": "Feishu Minutes" },
+        "identity": { "const": "user" },
+        "mode": { "const": "remote_transcript_readback" }
+      }
+    },
+    "status": { "const": "complete" },
+    "file_token": { "type": "string", "pattern": "^[A-Za-z0-9_-]{4,256}$" },
+    "minute_token": { "type": "string", "pattern": "^[a-z0-9]{8,128}$" },
+    "minute_url": { "type": "string" },
+    "transcript_path": { "type": "string", "minLength": 1 },
+    "transcript_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "transcript_chars": { "type": "integer", "minimum": 2 },
+    "remote_readback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "drive_upload_response_sha256",
+        "minute_upload_response_sha256",
+        "minute_detail_response_sha256"
+      ],
+      "properties": {
+        "drive_upload_response_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "minute_upload_response_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "minute_detail_response_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "reuse_source": {
+      "enum": ["new_upload", "same_run", "retry_state", "receipt_refresh"]
+    }
+  }
+}

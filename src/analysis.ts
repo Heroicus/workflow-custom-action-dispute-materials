@@ -1,6 +1,6 @@
-export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.3";
+export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.4";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.3.0";
+export const REQUIRED_SKILL_VERSION = "6.4.1";
 
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";
 export const PRODUCTION_TABLE_ID = "tbllz7nrxSIH8frX";
@@ -10,6 +10,8 @@ export const MODEL_CONTRACT = {
   vision_agent_name: "纠纷材料视觉核验员",
   vision_model: "Doubao-Seed-2.1-turbo",
   vision_result_schema: "vision-evidence/v1",
+  audio_transcription_service: "Feishu Minutes",
+  audio_result_schema: "audio-evidence/v1",
   write_policy: "main_agent_only",
 } as const;
 

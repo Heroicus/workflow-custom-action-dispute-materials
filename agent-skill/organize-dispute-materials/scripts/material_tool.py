@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 
 TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".wma", ".amr"}
 OOXML_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 IGNORED_NAMES = {".ds_store", "thumbs.db"}
 MAX_ARCHIVE_FILES = 500
@@ -30,6 +31,7 @@ MAX_ARCHIVE_BYTES = 500 * 1024 * 1024
 MIN_TEXT_CHARS_PER_PDF_PAGE = 24
 PDF_OCR_DPI = 300
 VISION_TASK_SCHEMA = "vision-task/v1"
+AUDIO_TASK_SCHEMA = "audio-task/v1"
 
 
 class MaterialError(Exception):
@@ -96,6 +98,64 @@ class VisionCollector:
                 "required_model": "Doubao-Seed-2.1-turbo",
                 "write_scope": "read_only_evidence",
                 "all_visual_units_required": True,
+            },
+            "tasks": tasks,
+            "summary": {"total": len(tasks), "pending": len(tasks)},
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return manifest
+
+
+def material_suffix(path: Path) -> str:
+    lower = path.name.lower()
+    if lower.endswith(".m4a.larkcache"):
+        return ".m4a"
+    return path.suffix.lower()
+
+
+class AudioCollector:
+    """Persist every audio attachment for Feishu Minutes transcription."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory.resolve()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.tasks: list[dict[str, object]] = []
+
+    def add(self, media: Path, *, source_file: str, source_sha256: str) -> str:
+        media_hash = sha256_file(media)
+        suffix = material_suffix(media)
+        identity = f"{source_file}\0{source_sha256}\0{media_hash}\0{media.stat().st_size}"
+        task_id = "aud_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+        destination = self.directory / f"{task_id}{suffix}"
+        if not destination.exists():
+            shutil.copyfile(media, destination)
+        self.tasks.append({
+            "schema_version": AUDIO_TASK_SCHEMA,
+            "task_id": task_id,
+            "source_file": source_file,
+            "source_sha256": source_sha256,
+            "media_path": str(destination),
+            "media_sha256": media_hash,
+            "media_suffix": suffix,
+            "size_bytes": media.stat().st_size,
+        })
+        return task_id
+
+    def write(self, path: Path) -> dict[str, object]:
+        task_ids = [str(task["task_id"]) for task in self.tasks]
+        duplicates = sorted(task_id for task_id, count in Counter(task_ids).items() if count > 1)
+        if duplicates:
+            raise MaterialError(f"duplicate audio task id: {duplicates[0]}")
+        tasks = sorted(self.tasks, key=lambda task: str(task["task_id"]))
+        manifest = {
+            "schema_version": AUDIO_TASK_SCHEMA,
+            "policy": {
+                "transcriber": "Feishu Minutes",
+                "identity": "user",
+                "result_schema": "audio-evidence/v1",
+                "write_scope": "transcript_only",
+                "all_audio_units_required": True,
             },
             "tasks": tasks,
             "summary": {"total": len(tasks), "pending": len(tasks)},
@@ -277,6 +337,21 @@ def extract_image(
             ocr=ocr,
         )
     return ocr.text, methods
+
+
+def extract_audio(
+    path: Path,
+    collector: AudioCollector | None = None,
+    display_name: str | None = None,
+    source_sha256: str | None = None,
+) -> tuple[str, list[str]]:
+    if collector:
+        collector.add(
+            path,
+            source_file=display_name or path.name,
+            source_sha256=source_sha256 or sha256_file(path),
+        )
+    return "", ["feishu_minutes_transcription_required"]
 
 
 def has_large_page_image(page: object) -> bool:
@@ -515,6 +590,7 @@ def extract_archive(
     path: Path,
     depth: int,
     collector: VisionCollector | None = None,
+    audio_collector: AudioCollector | None = None,
     display_name: str | None = None,
 ) -> tuple[str, list[str], list[str], list[dict[str, object]]]:
     if depth >= 2:
@@ -532,7 +608,10 @@ def extract_archive(
                 with archive.open(member) as source, target.open("wb") as destination:
                     shutil.copyfileobj(source, destination)
                 child_name = f"{display_name or path.name}::{decoded_name}"
-                result = extract_material(target, depth + 1, display_name=child_name, collector=collector)
+                result = extract_material(
+                    target, depth + 1, display_name=child_name,
+                    collector=collector, audio_collector=audio_collector,
+                )
                 children.append({key: value for key, value in asdict(result).items() if key != "text"})
                 if result.status not in {"complete", "ignored"}:
                     failures.append(child_name)
@@ -546,9 +625,10 @@ def extract_material(
     depth: int = 0,
     display_name: str | None = None,
     collector: VisionCollector | None = None,
+    audio_collector: AudioCollector | None = None,
 ) -> ExtractionResult:
     name = display_name or path.name
-    suffix = path.suffix.lower()
+    suffix = material_suffix(path)
     methods: list[str] = []
     failures: list[str] = []
     children: list[dict[str, object]] = []
@@ -557,7 +637,7 @@ def extract_material(
     ignored = False
     source_sha256 = sha256_file(path)
     try:
-        if path.stat().st_size == 0 and suffix == ".larkcache":
+        if path.stat().st_size == 0 and path.suffix.lower() == ".larkcache":
             ignored = True
             methods = ["empty_cache_ignored"]
         elif suffix in TEXT_SUFFIXES:
@@ -571,12 +651,12 @@ def extract_material(
             text, pages, methods, failures = extract_pdf(path, collector, name, source_sha256)
         elif suffix in IMAGE_SUFFIXES:
             text, methods = extract_image(path, collector, name, source_sha256)
+        elif suffix in AUDIO_SUFFIXES:
+            text, methods = extract_audio(path, audio_collector, name, source_sha256)
         elif suffix in {".doc", ".xls"}:
             text, methods = extract_legacy_office(path)
-        elif suffix == ".larkcache" and ".m4a.larkcache" in path.name.lower():
-            raise MaterialError("audio transcription unavailable")
         elif suffix == ".zip":
-            text, methods, failures, children = extract_archive(path, depth, collector, name)
+            text, methods, failures, children = extract_archive(path, depth, collector, audio_collector, name)
         else:
             raise MaterialError(f"unsupported file type: {suffix or '<none>'}")
     except Exception as exc:
@@ -639,6 +719,8 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--corpus", type=Path, required=True)
     extract.add_argument("--vision-dir", type=Path, required=True)
     extract.add_argument("--vision-tasks", type=Path, required=True)
+    extract.add_argument("--audio-dir", type=Path, required=True)
+    extract.add_argument("--audio-tasks", type=Path, required=True)
     return parser
 
 
@@ -649,13 +731,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not source.is_dir():
             raise MaterialError("input directory is not a directory")
         collector = VisionCollector(args.vision_dir)
-        results = [extract_material(path, collector=collector) for path in iter_material_files(source)]
+        audio_collector = AudioCollector(args.audio_dir)
+        results = [
+            extract_material(path, collector=collector, audio_collector=audio_collector)
+            for path in iter_material_files(source)
+        ]
         if not results:
             raise MaterialError("no attachment files found")
         manifest = write_outputs(results, args.output_dir, args.manifest, args.corpus)
         vision = collector.write(args.vision_tasks)
+        audio = audio_collector.write(args.audio_tasks)
         output = dict(manifest["summary"])
         output["vision_tasks"] = vision["summary"]["total"]
+        output["audio_tasks"] = audio["summary"]["total"]
         output["pdf_ocr_dpi"] = PDF_OCR_DPI
         print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
         return 0

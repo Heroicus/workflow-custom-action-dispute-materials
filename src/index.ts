@@ -15,10 +15,10 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.3.0-vision-subagent";
+const BUILD_ID = "6.4.1-audio-minutes";
 const REQUEST_TIMEOUT_MS = 10_000;
-const RUNNING_TTL_MS = 20 * 60 * 1000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
+const RECORD_QUEUES = new Map<string, Promise<void>>();
 
 const FIELD_CASE_NUMBER = PRODUCTION_FIELD_CONTRACT.case_number.name;
 const FIELD_ATTACHMENTS = PRODUCTION_FIELD_CONTRACT.attachments.name;
@@ -108,6 +108,23 @@ function safeMessage(error: unknown): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 180);
+}
+
+async function acquireRecordQueue(recordId: string): Promise<() => void> {
+  const previous = RECORD_QUEUES.get(recordId) || Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => { releaseCurrent = resolve; });
+  const tail = previous.catch(() => undefined).then(() => current);
+  RECORD_QUEUES.set(recordId, tail);
+  await previous.catch(() => undefined);
+  return () => {
+    releaseCurrent();
+    if (RECORD_QUEUES.get(recordId) === tail) RECORD_QUEUES.delete(recordId);
+  };
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function runtimeLogId(context: RuntimeContext): string {
@@ -376,22 +393,11 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
 function makeDispatchId(recordId: string): string {
   const stamp = Date.now();
   const nonce = Math.random().toString(36).slice(2, 8);
-  return `odm-v63:${recordId}:${stamp}:${nonce}`;
+  return `odm-v64:${recordId}:${stamp}:${nonce}`;
 }
 
 function taskLog(dispatchId: string, message: string): string {
   return `任务 ${dispatchId}：${message}`;
-}
-
-function dispatchStartedAt(log: string): number | undefined {
-  const match = log.match(/任务\s+odm-v\d+:[A-Za-z0-9_-]+:([0-9]{13}):[A-Za-z0-9]+：/);
-  const value = match ? Number(match[1]) : NaN;
-  return Number.isFinite(value) ? value : undefined;
-}
-
-function dispatchIdFromLog(log: string): string {
-  const match = log.match(/任务\s+(odm-v\d+:[A-Za-z0-9_-]+:[0-9]{13}:[A-Za-z0-9]+)：/);
-  return match ? match[1] : "";
 }
 
 function schemaName(field: UnknownRecord): string {
@@ -450,7 +456,7 @@ async function writeProcessing(
   if (scalarText(fieldValue(readback, FIELD_PROCESSING_STATUS)) !== "分析中") {
     throw new DispatchFailure("BASE_READBACK_FAILED", "mark-processing", "分析中状态读回不一致");
   }
-  if (!scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)).includes(dispatchId)) {
+  if (scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)) !== taskLog(dispatchId, "处理中")) {
     throw new DispatchFailure("BASE_READBACK_FAILED", "mark-processing", "任务标识读回不一致");
   }
 }
@@ -484,7 +490,7 @@ async function currentAttemptOwnsRecord(
 ): Promise<boolean> {
   const fields = await getRecord(context, token, target);
   return scalarText(fieldValue(fields, FIELD_PROCESSING_STATUS)) === "分析中"
-    && scalarText(fieldValue(fields, FIELD_EXECUTION_LOG)).includes(dispatchId);
+    && scalarText(fieldValue(fields, FIELD_EXECUTION_LOG)) === taskLog(dispatchId, "处理中");
 }
 
 async function writeFailureIfOwned(
@@ -544,7 +550,7 @@ function result(
 }
 
 basekit.addAction({
-  description: "读取当前案件附件，投递 Skill 内置模板渲染任务，并由智能体回写报告链接。",
+  description: "读取当前案件附件，核验图片并转写音频，使用 Skill 固定模板生成报告并回写同一记录。",
   actionText: "提交案件材料分析任务",
   permission: { type: 2 },
   useTenantAccessToken: true,
@@ -579,30 +585,26 @@ basekit.addAction({
     let token = "";
     let dispatchId = "";
     let mode: DispatchMode | "" = "";
+    let releaseQueue: (() => void) | undefined;
     try {
       validateRuntimeApp(context);
-      target = { recordId: targetRecordId(formItemParams), logId: runtimeLogId(context) };
+      const recordId = targetRecordId(formItemParams);
+      releaseQueue = await acquireRecordQueue(recordId);
+      target = { recordId, logId: runtimeLogId(context) };
       token = tenantToken(context);
       validateSchema(await getTableFields(context, token));
-      let fields = await getRecord(context, token, target);
+      const fields = await getRecord(context, token, target);
       const status = scalarText(fieldValue(fields, FIELD_PROCESSING_STATUS));
-      const currentLog = scalarText(fieldValue(fields, FIELD_EXECUTION_LOG));
       if (status === "分析中") {
-        const startedAt = dispatchStartedAt(currentLog);
-        if (!startedAt || Date.now() - startedAt < RUNNING_TTL_MS) {
-          return result(target, "", {
-            accepted: true,
-            dispatchState: "already_running",
-            stage: "inspect-materials",
-            errorCode: "",
-            errorMessage: "",
-            agentChatId: "",
-            mode: "",
-          });
-        }
-        const staleDispatchId = dispatchIdFromLog(currentLog) || makeDispatchId(target.recordId);
-        await markFailure(context, token, target, staleDispatchId, "AGENT_TIMEOUT", false);
-        fields = await getRecord(context, token, target);
+        return result(target, "", {
+          accepted: true,
+          dispatchState: "already_running",
+          stage: "inspect-materials",
+          errorCode: "",
+          errorMessage: "",
+          agentChatId: "",
+          mode: "",
+        });
       }
 
       let decision: MaterialDecision;
@@ -655,6 +657,10 @@ basekit.addAction({
       });
 
       try {
+        await sleep(500);
+        if (!(await currentAttemptOwnsRecord(context, token, target, dispatchId))) {
+          throw new DispatchFailure("BASE_STATE_CONFLICT", "create-agent-chat", "任务锁已被其他运行接管");
+        }
         const chatId = await createAgentChat(context, token, prompt);
         return result(target, dispatchId, {
           accepted: true,
@@ -709,6 +715,8 @@ basekit.addAction({
         agentChatId: "",
         mode,
       });
+    } finally {
+      releaseQueue?.();
     }
   },
 });
