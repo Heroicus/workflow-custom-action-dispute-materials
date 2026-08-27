@@ -1,6 +1,6 @@
 # 纠纷材料整理组件 6.1.2 / Skill 6.1.1 发布步骤
 
-1. 应用 `cli_aaf4c426ea785cbd` 必须已开通并发布 `drive:drive`、`docs:permission.member:create`；
+1. 应用 `cli_aaf4c426ea785cbd` 必须已开通并发布 `drive:drive`、`docs:permission.member:create`、`docs:permission.member:retrieve`；执行身份还须完成同一 `docs:permission.member:retrieve` 用户授权；
 2. 保留案件表隐藏文本字段 `材料处理基线`；
 3. 导入 `organize-dispute-materials-v6.1.1.zip`；
 4. 用 `纠纷材料整理专员员工档案配置.md` 更新员工档案；

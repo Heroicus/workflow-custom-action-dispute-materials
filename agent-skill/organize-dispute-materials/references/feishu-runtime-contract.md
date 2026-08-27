@@ -69,4 +69,5 @@ Base 精确读写
 ```text
 drive:drive
 docs:permission.member:create
+docs:permission.member:retrieve
 ```
