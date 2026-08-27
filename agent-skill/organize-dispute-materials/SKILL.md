@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.4.1"
+  version: "6.5.0"
   tier: STANDARD
   category: legal-automation
 ---
@@ -12,11 +12,11 @@ metadata:
 
 ## 输入
 
-只接受 `dispute-material-run/v6.4` JSON：
+只接受 `dispute-material-run/v6.5` JSON：
 
 ```text
 operation = process_target_record
-required_skill_version = 6.4.1
+required_skill_version = 6.5.0
 app_token、table_id、record_id、dispatch_id、case_number 非空
 mode = initial | supplement
 model_contract = Deepseek-V4-Pro 主写入 + Doubao-Seed-2.1-turbo 只读视觉 + Feishu Minutes 音频逐字稿
@@ -111,8 +111,13 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" scaffold \
 在脚手架上填写，不重建精简版 JSON：
 
 - 事实只来自 `extracted/verified-source-corpus.txt`；
-- 有明确依据就填写，没有依据保持空值；
-- 不删除 `evidence_rows`、`completeness_rows`、`quality_rows` 中的材料项；
+- 先按“当前程序 → 前置程序 → 证据事实”建立程序链。存在民事起诉状和法院送达材料时，当前案件类型是诉讼；历史仲裁裁决只能放入关联案件、程序记录和裁判历史，不得覆盖当前诉讼；
+- Base 案件编号与法院/仲裁案号分栏，禁止混用；一条记录包含多个关联案件或多个我方主体时，必须在当事人、关联案件、程序记录和矛盾登记中全部展开，不得只取第一个；
+- 核心事实有明确依据就填写；材料未写明填 `未载明`，字段不适用填 `不适用`，来源冲突或字迹无法唯一确认填 `待核` 并同步写入矛盾登记。只有整理人、审核人、负责人、期限等人工操作字段保留真空白；
+- `evidence_rows` 只填写正式证据项，不得把送达地址确认书、起诉状、申请书、答辩书、证据材料清单、裁判文书、庭审笔录或内部工作底稿当作证据；`completeness_rows` 必须覆盖全部材料；
+- 请求金额只来自当前请求事项。协议补偿、已付款、银行流水或裁判认定金额如果不是当前请求，不得写入“本金/应退款项”；
+- 身份证号、手机号和银行卡号必须脱敏；报告正文不得出现模型名、工具名、任务 schema、解析 method、调用参数或运行日志；
+- 不删除 `completeness_rows` 中的材料项；`quality_rows` 必须完整填写材料读取、事实来源、当前程序、金额、空值和内部过程泄露六项检查；
 - 裁决书或判决书已经记载结果时，同时填写第九章、`case_status` 和 `base_fields.case_status`；
 - `base_fields` 填写案件名称、案件类型、立案日期、案件状态；无依据字段留空。
 

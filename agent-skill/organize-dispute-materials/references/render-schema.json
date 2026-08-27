@@ -1,8 +1,38 @@
 {
-  "schema_version": "6.4.1",
+  "schema_version": "6.5.0",
   "template": "report-template.xml",
   "required_scalars": [
     "case_number"
+  ],
+  "semantic_required_scalars": [
+    "case_source",
+    "case_type",
+    "cause",
+    "tribunal",
+    "case_docket",
+    "case_status",
+    "our_position",
+    "our_name",
+    "our_role",
+    "opponent_name",
+    "opponent_role",
+    "claim_amount"
+  ],
+  "request_amount_scalars": [
+    "principal_amount",
+    "penalty_amount",
+    "interest_amount",
+    "lawyer_fee_amount",
+    "preservation_fee_amount",
+    "case_fee_amount"
+  ],
+  "required_quality_checks": [
+    "材料读取情况",
+    "事实来源核验",
+    "当前程序识别",
+    "金额复核",
+    "空值语义",
+    "内部过程泄露"
   ],
   "structure": {
     "h1_count": 15,
@@ -11,14 +41,18 @@
   },
   "forbidden_text": [
     "显示公平",
-    "未载明",
-    "未提供",
-    "暂无",
-    "不适用",
-    "待确认",
-    "需补充",
-    "人工复核",
-    "人工填写"
+    "ocr_unavailable",
+    "vision_required",
+    "pdf_text",
+    "docx_xml",
+    "embedded_ocr_unavailable",
+    "Deepseek-V4-Pro",
+    "Doubao-Seed-2.1-turbo",
+    "RunAgent",
+    "vision-evidence",
+    "audio-evidence",
+    "material_tool.py",
+    "report_tool.py"
   ],
   "dynamic_rows": {
     "request_rows": ["index", "request", "category", "amount", "basis", "evidence"],

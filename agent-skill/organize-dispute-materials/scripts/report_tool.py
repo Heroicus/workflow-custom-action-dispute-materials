@@ -35,11 +35,19 @@ BASE_FIELD_NAMES = {
 EXACT_SOURCE_SCALARS = {
     "case_type", "cause", "tribunal", "case_docket", "our_position", "our_role",
     "our_legal_entity", "our_name", "our_credit_code", "our_legal_representative",
-    "opponent_name", "opponent_id", "opponent_role", "judge", "clerk", "judgment_number",
+    "opponent_name", "opponent_role", "judge", "clerk", "judgment_number",
 }
 NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v1"
 AUDIO_PACK_SCHEMA = "audio-evidence-pack/v1"
+EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.5"
+EXPECTED_SKILL_VERSION = "6.5.0"
+EXPECTED_COMPONENT_BUILD = "6.5.0-semantic-report"
+NON_EVIDENCE_NAME_PATTERN = re.compile(
+    r"送达地址确认书|证据材料清单|证据目录|起诉状|仲裁申请书|答辩书|质证意见|裁决书|判决书|庭审笔录"
+)
+PRC_ID_PATTERN = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
+MOBILE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 
 
 class ReportError(Exception):
@@ -228,6 +236,9 @@ def render_report(facts: dict[str, Any], template: str, schema: dict[str, Any]) 
     scalars, rows, _ = validate_fact_shape(facts, template, schema)
     case_number = scalar_text(scalars.get("case_number"), "scalars.case_number")
     prepared_scalars = dict(scalars)
+    prepared_scalars["opponent_id"] = mask_identifier(scalar_text(prepared_scalars.get("opponent_id"), "scalars.opponent_id"))
+    prepared_scalars["opponent_contact"] = mask_contact(scalar_text(prepared_scalars.get("opponent_contact"), "scalars.opponent_contact"))
+    prepared_scalars["our_contact"] = mask_contact(scalar_text(prepared_scalars.get("our_contact"), "scalars.our_contact"))
     if not scalar_text(prepared_scalars.get("document_title"), "scalars.document_title"):
         prepared_scalars["document_title"] = f"{case_number} 诉讼/仲裁案件材料梳理报告"
     output = template
@@ -263,6 +274,16 @@ def normalize_text(value: str) -> str:
 
 def source_key(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", html.unescape(value or "")).lower()
+
+
+def source_literal_supported(value: str, corpus_key: str) -> bool:
+    normalized = source_key(value)
+    if not normalized:
+        return True
+    if normalized in corpus_key:
+        return True
+    parts = [source_key(item) for item in re.split(r"[；;、|/\n]+", value) if source_key(item)]
+    return len(parts) > 1 and all(item in corpus_key for item in parts)
 
 
 def element_text(element: ET.Element) -> str:
@@ -347,7 +368,7 @@ def fact_values(facts: dict[str, Any], schema: dict[str, Any], evidentiary_only:
     scalars = facts.get("scalars", {})
     if isinstance(scalars, dict):
         for name, value in scalars.items():
-            if name not in {"case_number", "document_title"}:
+            if name not in {"case_number", "document_title", "opponent_id", "opponent_contact", "our_contact"}:
                 yield scalar_text(value, f"scalars.{name}")
     rows = facts.get("rows", {})
     if not isinstance(rows, dict):
@@ -374,6 +395,10 @@ def numeric_literals(value: str) -> set[str]:
     return values
 
 
+def canonical_numeric_literals(value: str) -> set[str]:
+    return {item.rstrip("0").rstrip(".") if "." in item else item for item in numeric_literals(value)}
+
+
 def manifest_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     items = manifest.get("items")
     if not isinstance(items, list) or not items:
@@ -397,19 +422,12 @@ def manifest_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return leaves
 
 
-def evidence_type(name: str) -> str:
-    suffix = Path(name.removesuffix(".larkcache")).suffix.lower()
-    if suffix == ".pdf":
-        return "PDF"
-    if suffix in {".doc", ".docx"}:
-        return "Word"
-    if suffix in {".xls", ".xlsx", ".csv"}:
-        return "表格"
-    if suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}:
-        return "图片"
-    if suffix in {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".wma", ".amr"}:
-        return "音频"
-    return "文件"
+def mask_identifier(value: str) -> str:
+    return PRC_ID_PATTERN.sub(lambda match: match.group(0)[:6] + "********" + match.group(0)[-4:], value)
+
+
+def mask_contact(value: str) -> str:
+    return MOBILE_PATTERN.sub(lambda match: match.group(0)[:3] + "****" + match.group(0)[-4:], value)
 
 
 def build_scaffold(case_number: str, manifest: dict[str, Any], template: str, schema: dict[str, Any]) -> dict[str, Any]:
@@ -420,16 +438,8 @@ def build_scaffold(case_number: str, manifest: dict[str, Any], template: str, sc
     for index, item in enumerate(entries, 1):
         name = scalarish(item.get("file_name"))
         status = scalarish(item.get("status")) or "failed"
-        pages = scalarish(item.get("page_count"))
-        methods = item.get("methods") if isinstance(item.get("methods"), list) else []
-        rows["evidence_rows"].append({
-            "index": str(index), "name": name, "type": evidence_type(name), "purpose": "",
-            "original_status": "", "pages": pages, "date": "", "existing_note": "",
-        })
         availability = {"complete": "是", "partial": "部分", "failed": "否"}.get(status, "否")
         note = {"complete": "解析完成", "partial": "仅部分内容可读取", "failed": "该文件无法解析"}.get(status, "该文件无法解析")
-        if methods:
-            note += f"（{','.join(str(item) for item in methods)}）"
         rows["completeness_rows"].append({
             "index": str(index), "source_check_item": name, "available": availability, "source_note": note,
         })
@@ -437,7 +447,10 @@ def build_scaffold(case_number: str, manifest: dict[str, Any], template: str, sc
     rows["quality_rows"] = [{
         "index": "1", "check": "材料读取情况",
         "result": f"共{len(entries)}项，完整{counts['complete']}项，部分{counts['partial']}项，无法解析{counts['failed']}项",
-    }]
+    }] + [
+        {"index": str(index), "check": check, "result": ""}
+        for index, check in enumerate(schema.get("required_quality_checks", [])[1:], 2)
+    ]
     return {"scalars": scalars, "rows": rows, "base_fields": {key: "" for key in BASE_FIELD_KEYS}}
 
 
@@ -446,18 +459,110 @@ def validate_manifest_coverage(rows: dict[str, Any], manifest: dict[str, Any]) -
     expected = [scalarish(item.get("file_name")) for item in entries]
     evidence = [scalarish(row.get("name")) for row in rows["evidence_rows"]]
     completeness = [scalarish(row.get("source_check_item")) for row in rows["completeness_rows"]]
-    if Counter(evidence) != Counter(expected) or Counter(completeness) != Counter(expected):
+    unknown_evidence = sorted((Counter(evidence) - Counter(expected)).elements())
+    if unknown_evidence or Counter(completeness) != Counter(expected):
         raise ReportError(
-            "MATERIAL_COVERAGE_INCOMPLETE", "证据清单或材料完整性表未覆盖全部材料",
+            "MATERIAL_COVERAGE_INCOMPLETE", "证据清单引用了未知材料，或材料完整性表未覆盖全部材料",
             {
                 "expected": len(expected), "evidence_rows": len(evidence), "completeness_rows": len(completeness),
-                "missing_evidence": sorted((Counter(expected) - Counter(evidence)).elements())[:10],
+                "unknown_evidence": unknown_evidence[:10],
                 "missing_completeness": sorted((Counter(expected) - Counter(completeness)).elements())[:10],
             },
         )
     if not rows["quality_rows"]:
         raise ReportError("MATERIAL_COVERAGE_INCOMPLETE", "AI 输出质量自检表缺少材料读取情况")
     return Counter(scalarish(item.get("status")) or "failed" for item in entries)
+
+
+def validate_semantic_completion(
+    scalars: dict[str, Any], rows: dict[str, Any], schema: dict[str, Any], corpus_key: str,
+) -> None:
+    missing = [
+        name for name in schema.get("semantic_required_scalars", [])
+        if not scalar_text(scalars.get(name), f"scalars.{name}")
+    ]
+    if missing:
+        raise ReportError(
+            "SEMANTIC_FACT_MISSING", "核心事实字段不得留空；无唯一值时使用未载明、不适用或待核",
+            {"fields": missing},
+        )
+
+    for field in ("opponent_id", "opponent_contact", "our_contact"):
+        value = scalar_text(scalars.get(field), f"scalars.{field}")
+        if PRC_ID_PATTERN.search(value) or MOBILE_PATTERN.search(value):
+            raise ReportError("PERSONAL_DATA_UNMASKED", "报告事实包含未脱敏身份证号或手机号", {"field": field})
+
+    evidence_violations = [
+        scalarish(row.get("name")) for row in rows.get("evidence_rows", [])
+        if NON_EVIDENCE_NAME_PATTERN.search(scalarish(row.get("name")))
+    ]
+    if evidence_violations:
+        raise ReportError(
+            "MATERIAL_EVIDENCE_CONFLATED", "程序文书、当事人提交材料或工作清单不得列入证据总表",
+            {"names": evidence_violations[:20]},
+        )
+
+    has_civil_complaint = source_key("民事起诉状") in corpus_key
+    has_court_service = source_key("人民法院送达地址确认书") in corpus_key
+    has_award = source_key("裁决书") in corpus_key
+    case_type = scalar_text(scalars.get("case_type"), "scalars.case_type")
+    if has_civil_complaint and has_court_service and case_type != "诉讼":
+        raise ReportError(
+            "CURRENT_PROCEEDING_MISCLASSIFIED", "当前材料同时存在民事起诉状和法院送达材料，当前程序不得归类为仲裁",
+            {"actual": case_type, "expected": "诉讼"},
+        )
+    if has_civil_complaint and has_award:
+        if not scalar_text(scalars.get("related_case"), "scalars.related_case"):
+            raise ReportError("PROCEEDING_CHAIN_MISSING", "当前诉讼与前置仲裁未分层登记，缺少关联案件")
+        if not rows.get("procedure_rows") or not rows.get("conflict_rows"):
+            raise ReportError("PROCEEDING_CHAIN_MISSING", "存在前置仲裁和当前诉讼时，程序节点与阶段冲突登记不能为空")
+
+    request_text = " ".join(
+        scalar_text(value, f"rows.request_rows[{index}].{key}")
+        for index, row in enumerate(rows.get("request_rows", [])) if isinstance(row, dict)
+        for key, value in row.items() if key != "index"
+    )
+    request_numbers = canonical_numeric_literals(request_text)
+    for name in schema.get("request_amount_scalars", []):
+        value = scalar_text(scalars.get(name), f"scalars.{name}")
+        unsupported = canonical_numeric_literals(value) - request_numbers
+        if value and unsupported:
+            raise ReportError(
+                "CALCULATION_NOT_REQUEST_BACKED", "金额汇总不得把已支付款或证据金额误写为诉讼请求金额",
+                {"field": name, "values": sorted(unsupported)},
+            )
+
+    truncated: list[str] = []
+    for index, row in enumerate(rows.get("our_argument_rows", [])):
+        if not isinstance(row, dict):
+            continue
+        focus = scalarish(row.get("focus"))
+        record = scalarish(row.get("our_record"))
+        if focus and record.startswith(focus) and len(record) >= len(focus) + 4:
+            truncated.append(f"rows.our_argument_rows[{index}].focus")
+    for marker, values in rows.items():
+        if not isinstance(values, list):
+            continue
+        for index, row in enumerate(values):
+            if not isinstance(row, dict):
+                continue
+            for key, value in row.items():
+                text = scalarish(value)
+                if re.search(r"至\s*\d{4}(?:年\d{1,2}月?)?$", text):
+                    truncated.append(f"rows.{marker}[{index}].{key}")
+    if truncated:
+        raise ReportError("FACT_TEXT_TRUNCATED", "结构化事实存在明显截断文本", {"fields": sorted(set(truncated))[:20]})
+
+    checks = {
+        scalarish(row.get("check")): scalarish(row.get("result"))
+        for row in rows.get("quality_rows", []) if isinstance(row, dict)
+    }
+    missing_checks = [
+        item for item in schema.get("required_quality_checks", [])
+        if item not in checks or not checks[item]
+    ]
+    if missing_checks:
+        raise ReportError("QUALITY_GATE_INCOMPLETE", "AI输出质量自检缺少必检项", {"checks": missing_checks})
 
 
 def validate_vision_evidence(
@@ -844,11 +949,12 @@ def validate_fact_evidence(
     unsupported_scalars: list[str] = []
     for name in sorted(EXACT_SOURCE_SCALARS):
         value = scalar_text(scalars.get(name), f"scalars.{name}")
-        if value and source_key(value) not in corpus_key:
+        if value and not source_literal_supported(value, corpus_key):
             unsupported_scalars.append(name)
     if unsupported_scalars:
         raise ReportError("FACT_LITERAL_UNSUPPORTED", "姓名、机构、案号或身份字段无原文支持", {"fields": unsupported_scalars})
     require_source_sections(scalars, rows, corpus_key)
+    validate_semantic_completion(scalars, rows, schema, corpus_key)
     case_type = scalar_text(scalars.get("case_type"), "scalars.case_type")
     case_status = scalar_text(scalars.get("case_status"), "scalars.case_status")
     base_case_type = scalar_text(base_fields.get("case_type"), "base_fields.case_type")
@@ -950,6 +1056,12 @@ def comparable(field: str, value: Any) -> Any:
 
 
 def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
+    if runtime.get("type") != EXPECTED_RUNTIME_TYPE:
+        raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封版本不正确")
+    if runtime.get("required_skill_version") != EXPECTED_SKILL_VERSION:
+        raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封要求的 Skill 版本不正确")
+    if runtime.get("component_build") != EXPECTED_COMPONENT_BUILD:
+        raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封中的小组件 build 不正确")
     contract = runtime.get("model_contract")
     expected = {
         "main_model": "Deepseek-V4-Pro",
@@ -979,7 +1091,8 @@ def validate_dispatch_ownership(runtime: dict[str, Any], record_values: dict[str
 
 def build_writeback(
     runtime: dict[str, Any], facts: dict[str, Any], manifest: dict[str, Any],
-    audio_evidence: dict[str, Any], document_token: str,
+    vision_evidence: dict[str, Any], audio_evidence: dict[str, Any], source_corpus: str,
+    document_token: str,
     report_url: str, schema: dict[str, Any], record_values: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_runtime_model_contract(runtime)
@@ -1009,6 +1122,20 @@ def build_writeback(
         "document_token": document_token,
         "processed_attachment_ids": sorted(set(attachment_ids)),
         "contract_version": schema["schema_version"],
+        "component_build": scalarish(runtime.get("component_build")),
+        "skill_version": scalarish(runtime.get("required_skill_version")),
+        "source_corpus_sha256": hashlib.sha256(source_corpus.encode("utf-8")).hexdigest(),
+        "vision_verification": {
+            "schema_version": scalarish(vision_evidence.get("schema_version")),
+            "expected": scalarish(vision_evidence.get("summary", {}).get("expected")),
+            "received": scalarish(vision_evidence.get("summary", {}).get("received")),
+            "verified_corpus_sha256": scalarish(vision_evidence.get("artifacts", {}).get("verified_corpus_sha256")),
+        },
+        "audio_verification": {
+            "schema_version": scalarish(audio_evidence.get("schema_version")),
+            "expected": scalarish(audio_evidence.get("summary", {}).get("expected")),
+            "received": scalarish(audio_evidence.get("summary", {}).get("received")),
+        },
         "audio_minutes": audio_minutes_baseline(audio_evidence),
     }
     patch.update({
@@ -1173,6 +1300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output["input"] = str(args.input.resolve())
         elif args.command == "validate-dispatch":
             runtime = read_json(args.runtime)
+            validate_runtime_model_contract(runtime)
             validate_dispatch_ownership(runtime, record_field_map(args.record_readback))
             output = {"status": "valid", "dispatch_owner": scalarish(runtime.get("dispatch_id"))}
         elif args.command == "build-writeback":
@@ -1181,8 +1309,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 vision_corpus = args.vision_corpus.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ReportError("SOURCE_CORPUS_UNAVAILABLE", "无法读取最终材料语料", {"reason": str(exc)}) from exc
+            vision_evidence = read_json(args.vision_evidence)
             validate_vision_evidence(
-                read_json(args.vision_evidence), vision_corpus, read_json(args.vision_tasks),
+                vision_evidence, vision_corpus, read_json(args.vision_tasks),
                 sha256_file(args.vision_tasks),
             )
             audio_evidence = read_json(args.audio_evidence)
@@ -1193,7 +1322,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             record_values = record_field_map(args.record_readback)
             update, expectation = build_writeback(
                 read_json(args.runtime), read_json(args.facts), read_json(args.manifest),
-                audio_evidence, args.document_token.strip(), args.report_url.strip(), schema, record_values,
+                vision_evidence, audio_evidence, corpus, args.document_token.strip(),
+                args.report_url.strip(), schema, record_values,
             )
             atomic_write(args.output, json.dumps(update, ensure_ascii=False, separators=(",", ":")))
             atomic_write(args.expectation, json.dumps(expectation, ensure_ascii=False, indent=2))

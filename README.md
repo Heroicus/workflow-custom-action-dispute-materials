@@ -1,6 +1,6 @@
 # 纠纷材料整理工作流组件
 
-当前待发布版本：小组件 `6.4.1` / Skill `6.4.1`
+当前待发布版本：小组件 `6.5.0` / Skill `6.5.0`
 文档架构：全附件提取 + Tesseract/豆包视觉双路核验 + 飞书妙记音频逐字稿 + DeepSeek 单写入 + 完整事实脚手架 + 固定 XML + 实际回写校验
 
 ```text
@@ -23,7 +23,7 @@
 {
   "document_token": "报告 token",
   "processed_attachment_ids": ["已处理附件 ID"],
-  "contract_version": "6.4.1",
+  "contract_version": "6.5.0",
   "audio_minutes": {
     "音频 SHA-256": {
       "file_token": "云盘文件 token",
@@ -59,6 +59,6 @@ targetRecordId = 第 1 步新增案件记录.Record ID
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v6.4.1.zip --json
-unzip -t output/organize-dispute-materials-v6.4.1.zip
+  --output output/organize-dispute-materials-v6.5.0.zip --json
+unzip -t output/organize-dispute-materials-v6.5.0.zip
 ```

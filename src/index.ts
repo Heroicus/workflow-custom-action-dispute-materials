@@ -15,7 +15,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.4.1-audio-minutes";
+const BUILD_ID = "6.5.0-semantic-report";
 const REQUEST_TIMEOUT_MS = 10_000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
 const RECORD_QUEUES = new Map<string, Promise<void>>();
