@@ -1,4 +1,4 @@
 interface:
   display_name: "纠纷材料整理"
   short_description: "使用内置固定模板整理当前案件附件并回写同一记录"
-  default_prompt: "使用 $organize-dispute-materials 6.2.0 处理 dispute-material-run/v6.2 JSON。使用 material_tool.py 一次提取全部附件，在 report_tool.py 生成的完整脚手架上填写事实；事实、报告、权限和 Base 八个回写字段全部校验通过后才返回完成。"
+  default_prompt: "使用 $organize-dispute-materials 6.3.0 处理 dispute-material-run/v6.3 JSON。使用 material_tool.py 一次提取全部附件；对每个视觉任务调用 Doubao-Seed-2.1-turbo 只读子智能体并通过 vision_tool.py 核验；仅由 Deepseek-V4-Pro 主智能体填写完整事实脚手架。事实、视觉证据、报告、权限和 Base 八个回写字段全部校验通过后才返回完成。"

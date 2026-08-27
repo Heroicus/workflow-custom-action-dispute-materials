@@ -38,6 +38,7 @@ EXACT_SOURCE_SCALARS = {
     "opponent_name", "opponent_id", "opponent_role", "judge", "clerk", "judgment_number",
 }
 NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
+VISION_PACK_SCHEMA = "vision-evidence-pack/v1"
 
 
 class ReportError(Exception):
@@ -57,6 +58,17 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReportError("JSON_INVALID", f"JSON 根节点必须是对象：{path}")
     return value
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise ReportError("VISION_TASKS_UNAVAILABLE", f"无法读取视觉任务清单：{path}", {"reason": str(exc)}) from exc
+    return digest.hexdigest()
 
 
 def json_values(source: str) -> Iterator[Any]:
@@ -447,6 +459,107 @@ def validate_manifest_coverage(rows: dict[str, Any], manifest: dict[str, Any]) -
     return Counter(scalarish(item.get("status")) or "failed" for item in entries)
 
 
+def validate_vision_evidence(
+    evidence: dict[str, Any], source_corpus: str | None = None,
+    vision_tasks: dict[str, Any] | None = None, vision_tasks_sha256: str | None = None,
+) -> dict[str, Any]:
+    if evidence.get("schema_version") != VISION_PACK_SCHEMA:
+        raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据包版本不正确")
+    policy = evidence.get("policy")
+    summary = evidence.get("summary")
+    tasks = evidence.get("tasks")
+    unresolved = evidence.get("unresolved")
+    artifacts = evidence.get("artifacts")
+    if not isinstance(policy, dict) or not isinstance(summary, dict) or not isinstance(tasks, list) or not isinstance(unresolved, list) or not isinstance(artifacts, dict):
+        raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据包结构不完整")
+    if policy != {
+        "main_writer": "Deepseek-V4-Pro",
+        "vision_worker": "Doubao-Seed-2.1-turbo",
+        "single_writer": True,
+        "vision_worker_write_scope": "read_only_evidence",
+    }:
+        raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据包不符合主智能体单写入契约")
+    expected = summary.get("expected")
+    received = summary.get("received")
+    failed = summary.get("failed")
+    unresolved_count = summary.get("unresolved")
+    if not all(isinstance(value, int) and value >= 0 for value in (expected, received, failed, unresolved_count)):
+        raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据包统计值不合法")
+    complete = summary.get("complete")
+    partial = summary.get("partial")
+    if not all(isinstance(value, int) and value >= 0 for value in (complete, partial)):
+        raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据包完成统计值不合法")
+    if expected != received or received != len(tasks) or complete + partial + failed != received or failed or unresolved_count or unresolved:
+        raise ReportError(
+            "VISION_EVIDENCE_INCOMPLETE", "视觉子智能体结果未全部核清",
+            {"expected": expected, "received": received, "failed": failed, "unresolved": unresolved_count},
+        )
+    task_map: dict[str, tuple[str, str]] = {}
+    for item in tasks:
+        if not isinstance(item, dict):
+            raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据任务必须是对象")
+        task_id = scalarish(item.get("task_id"))
+        source_hash = scalarish(item.get("source_sha256"))
+        image_hash = scalarish(item.get("image_sha256"))
+        producer = item.get("producer")
+        if (
+            not re.fullmatch(r"vis_[0-9a-f]{20}", task_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
+            or not re.fullmatch(r"[0-9a-f]{64}", image_hash)
+            or item.get("status") not in {"complete", "partial"}
+            or not isinstance(producer, dict)
+            or producer.get("agent_name") != "纠纷材料视觉核验员"
+            or producer.get("model") != "Doubao-Seed-2.1-turbo"
+        ):
+            raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据任务身份、哈希或状态不正确", {"task_id": task_id})
+        if task_id in task_map:
+            raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据任务 ID 重复", {"task_id": task_id})
+        fields = item.get("critical_fields")
+        regions = item.get("uncertain_regions")
+        if (
+            not isinstance(fields, list)
+            or any(not isinstance(field, dict) or field.get("status") != "clear" for field in fields)
+            or not isinstance(regions, list)
+            or any(not isinstance(region, dict) or region.get("critical") is True for region in regions)
+        ):
+            raise ReportError("VISION_EVIDENCE_INCOMPLETE", "视觉证据任务仍有未决关键字段", {"task_id": task_id})
+        task_map[task_id] = (source_hash, image_hash)
+    required_artifacts = {"vision_tasks_sha256", "source_corpus_sha256", "verified_corpus_sha256"}
+    if set(artifacts) != required_artifacts or any(
+        value is not None and not re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in artifacts.values()
+    ):
+        raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据包工件哈希不正确")
+    if vision_tasks is not None:
+        raw_expected_tasks = vision_tasks.get("tasks")
+        if vision_tasks.get("schema_version") != "vision-task/v1" or not isinstance(raw_expected_tasks, list):
+            raise ReportError("VISION_TASKS_INVALID", "视觉任务清单版本或结构不正确")
+        expected_map: dict[str, tuple[str, str]] = {}
+        for item in raw_expected_tasks:
+            if not isinstance(item, dict):
+                raise ReportError("VISION_TASKS_INVALID", "视觉任务必须是对象")
+            task_id = scalarish(item.get("task_id"))
+            if not task_id or task_id in expected_map:
+                raise ReportError("VISION_TASKS_INVALID", "视觉任务 ID 缺失或重复", {"task_id": task_id})
+            expected_map[task_id] = (scalarish(item.get("source_sha256")), scalarish(item.get("image_sha256")))
+        if expected_map != task_map or expected != len(expected_map):
+            raise ReportError("VISION_EVIDENCE_MISMATCH", "视觉证据与本次任务清单不一致")
+    if vision_tasks_sha256 is not None and artifacts.get("vision_tasks_sha256") != vision_tasks_sha256:
+        raise ReportError("VISION_EVIDENCE_MISMATCH", "视觉任务清单文件哈希与证据包不一致")
+    if source_corpus is not None:
+        if artifacts.get("verified_corpus_sha256") != hashlib.sha256(source_corpus.encode("utf-8")).hexdigest():
+            raise ReportError("VISION_CORPUS_MISMATCH", "最终材料语料哈希与视觉证据包不一致")
+        corpus_key = source_key(source_corpus)
+        missing: list[str] = []
+        for item in tasks:
+            text = scalarish(item.get("verbatim_text"))
+            task_id = scalarish(item.get("task_id"))
+            if text and source_key(text) not in corpus_key:
+                missing.append(task_id)
+        if missing:
+            raise ReportError("VISION_CORPUS_MISMATCH", "视觉逐字转录未进入最终材料语料", {"task_ids": missing[:20]})
+    return {"vision_expected": expected, "vision_received": received, "vision_ocr_disagreements": summary.get("ocr_disagreements", 0)}
+
+
 def require_source_sections(scalars: dict[str, Any], rows: dict[str, Any], corpus_key: str) -> None:
     missing: list[str] = []
 
@@ -482,10 +595,13 @@ def require_source_sections(scalars: dict[str, Any], rows: dict[str, Any], corpu
 
 
 def validate_fact_evidence(
-    facts: dict[str, Any], template: str, schema: dict[str, Any], source_corpus: str, manifest: dict[str, Any],
+    facts: dict[str, Any], template: str, schema: dict[str, Any], source_corpus: str,
+    manifest: dict[str, Any], vision_evidence: dict[str, Any], vision_tasks: dict[str, Any],
+    vision_tasks_sha256: str,
 ) -> dict[str, Any]:
     scalars, rows, base_fields = validate_fact_shape(facts, template, schema)
     counts = validate_manifest_coverage(rows, manifest)
+    vision_summary = validate_vision_evidence(vision_evidence, source_corpus, vision_tasks, vision_tasks_sha256)
     evidence_corpus = "\n".join(
         line for line in source_corpus.splitlines()
         if not line.startswith(("=== ", "--- "))
@@ -527,6 +643,7 @@ def validate_fact_evidence(
     return {
         "status": "valid", "numeric_literal_count": len(literals), "material_count": sum(counts.values()),
         "complete_materials": counts["complete"], "partial_materials": counts["partial"], "failed_materials": counts["failed"],
+        **vision_summary,
     }
 
 
@@ -608,10 +725,24 @@ def comparable(field: str, value: Any) -> Any:
     return text
 
 
+def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
+    contract = runtime.get("model_contract")
+    expected = {
+        "main_model": "Deepseek-V4-Pro",
+        "vision_agent_name": "纠纷材料视觉核验员",
+        "vision_model": "Doubao-Seed-2.1-turbo",
+        "vision_result_schema": "vision-evidence/v1",
+        "write_policy": "main_agent_only",
+    }
+    if not isinstance(contract, dict) or any(contract.get(key) != value for key, value in expected.items()):
+        raise ReportError("MODEL_CONTRACT_MISMATCH", "运行信封中的主子模型契约不正确")
+
+
 def build_writeback(
     runtime: dict[str, Any], facts: dict[str, Any], manifest: dict[str, Any], document_token: str,
     report_url: str, schema: dict[str, Any], record_values: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    validate_runtime_model_contract(runtime)
     record_id = scalarish(runtime.get("record_id"))
     dispatch_id = scalarish(runtime.get("dispatch_id"))
     mode = scalarish(runtime.get("mode"))
@@ -716,6 +847,8 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--facts", type=Path, required=True)
     evidence.add_argument("--source-corpus", type=Path, required=True)
     evidence.add_argument("--manifest", type=Path, required=True)
+    evidence.add_argument("--vision-evidence", type=Path, required=True)
+    evidence.add_argument("--vision-tasks", type=Path, required=True)
     render = subparsers.add_parser("render")
     render.add_argument("--facts", type=Path, required=True)
     render.add_argument("--output", type=Path, required=True)
@@ -726,6 +859,9 @@ def build_parser() -> argparse.ArgumentParser:
     writeback.add_argument("--runtime", type=Path, required=True)
     writeback.add_argument("--facts", type=Path, required=True)
     writeback.add_argument("--manifest", type=Path, required=True)
+    writeback.add_argument("--vision-evidence", type=Path, required=True)
+    writeback.add_argument("--vision-tasks", type=Path, required=True)
+    writeback.add_argument("--source-corpus", type=Path, required=True)
     writeback.add_argument("--document-token", required=True)
     writeback.add_argument("--report-url", required=True)
     writeback.add_argument("--record-readback", type=Path)
@@ -759,7 +895,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 corpus = args.source_corpus.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ReportError("SOURCE_CORPUS_UNAVAILABLE", "无法读取材料文本或 OCR 汇总", {"reason": str(exc)}) from exc
-            output = validate_fact_evidence(read_json(args.facts), template, schema, corpus, read_json(args.manifest))
+            output = validate_fact_evidence(
+                read_json(args.facts), template, schema, corpus,
+                read_json(args.manifest), read_json(args.vision_evidence), read_json(args.vision_tasks),
+                sha256_file(args.vision_tasks),
+            )
         elif args.command == "render":
             facts = read_json(args.facts)
             rendered = render_report(facts, template, schema)
@@ -771,6 +911,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             output = validate_report(extract_document_content(args.input), template, schema, facts)
             output["input"] = str(args.input.resolve())
         elif args.command == "build-writeback":
+            try:
+                corpus = args.source_corpus.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ReportError("SOURCE_CORPUS_UNAVAILABLE", "无法读取最终材料语料", {"reason": str(exc)}) from exc
+            validate_vision_evidence(
+                read_json(args.vision_evidence), corpus, read_json(args.vision_tasks),
+                sha256_file(args.vision_tasks),
+            )
             record_values = record_field_map(args.record_readback) if args.record_readback else None
             update, expectation = build_writeback(
                 read_json(args.runtime), read_json(args.facts), read_json(args.manifest),

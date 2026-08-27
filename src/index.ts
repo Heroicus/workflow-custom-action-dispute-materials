@@ -15,7 +15,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.2.0-complete-report";
+const BUILD_ID = "6.3.0-vision-subagent";
 const REQUEST_TIMEOUT_MS = 10_000;
 const RUNNING_TTL_MS = 20 * 60 * 1000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
@@ -376,7 +376,7 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
 function makeDispatchId(recordId: string): string {
   const stamp = Date.now();
   const nonce = Math.random().toString(36).slice(2, 8);
-  return `odm-v62:${recordId}:${stamp}:${nonce}`;
+  return `odm-v63:${recordId}:${stamp}:${nonce}`;
 }
 
 function taskLog(dispatchId: string, message: string): string {

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -12,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -25,10 +28,81 @@ IGNORED_NAMES = {".ds_store", "thumbs.db"}
 MAX_ARCHIVE_FILES = 500
 MAX_ARCHIVE_BYTES = 500 * 1024 * 1024
 MIN_TEXT_CHARS_PER_PDF_PAGE = 24
+PDF_OCR_DPI = 300
+VISION_TASK_SCHEMA = "vision-task/v1"
 
 
 class MaterialError(Exception):
     """A stable material extraction failure."""
+
+
+@dataclass(frozen=True)
+class OCRResult:
+    text: str
+    mean_confidence: float | None
+
+
+class VisionCollector:
+    """Persist every image that needs independent multimodal verification."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory.resolve()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.tasks: list[dict[str, object]] = []
+
+    def add(
+        self,
+        image: Path,
+        *,
+        source_file: str,
+        source_sha256: str,
+        unit: str,
+        page: int | None,
+        reason: str,
+        ocr: OCRResult,
+    ) -> str:
+        image_hash = sha256_file(image)
+        identity = f"{source_file}\0{source_sha256}\0{unit}\0{page or 0}\0{image_hash}"
+        task_id = "vis_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+        suffix = image.suffix.lower() if image.suffix.lower() in IMAGE_SUFFIXES else ".png"
+        destination = self.directory / f"{task_id}{suffix}"
+        if not destination.exists():
+            shutil.copyfile(image, destination)
+        self.tasks.append({
+            "schema_version": VISION_TASK_SCHEMA,
+            "task_id": task_id,
+            "source_file": source_file,
+            "source_sha256": source_sha256,
+            "unit": unit,
+            "page": page,
+            "reason": reason,
+            "image_path": str(destination),
+            "image_sha256": image_hash,
+            "ocr_text": ocr.text,
+            "ocr_mean_confidence": ocr.mean_confidence,
+        })
+        return task_id
+
+    def write(self, path: Path) -> dict[str, object]:
+        task_ids = [str(task["task_id"]) for task in self.tasks]
+        duplicates = sorted(task_id for task_id, count in Counter(task_ids).items() if count > 1)
+        if duplicates:
+            raise MaterialError(f"duplicate vision task id: {duplicates[0]}")
+        tasks = sorted(self.tasks, key=lambda task: str(task["task_id"]))
+        manifest = {
+            "schema_version": VISION_TASK_SCHEMA,
+            "policy": {
+                "worker": "纠纷材料视觉核验员",
+                "required_model": "Doubao-Seed-2.1-turbo",
+                "write_scope": "read_only_evidence",
+                "all_visual_units_required": True,
+            },
+            "tasks": tasks,
+            "summary": {"total": len(tasks), "pending": len(tasks)},
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return manifest
 
 
 @dataclass
@@ -80,7 +154,12 @@ def xml_text(payload: bytes) -> str:
     return "\n".join(values)
 
 
-def extract_ooxml(path: Path) -> tuple[str, list[str]]:
+def extract_ooxml(
+    path: Path,
+    collector: VisionCollector | None = None,
+    display_name: str | None = None,
+    source_sha256: str | None = None,
+) -> tuple[str, list[str]]:
     suffix = path.suffix.lower()
     prefixes = {
         ".docx": ("word/document.xml", "word/header", "word/footer", "word/footnotes.xml", "word/endnotes.xml"),
@@ -103,13 +182,26 @@ def extract_ooxml(path: Path) -> tuple[str, list[str]]:
                 with tempfile.NamedTemporaryFile(suffix=Path(name).suffix, delete=False) as handle:
                     temporary_name = handle.name
                     handle.write(archive.read(name))
-                text = run_tesseract(Path(temporary_name))
-                if text:
-                    parts.append(f"[{name}:OCR]\n{text}")
+                try:
+                    ocr = run_tesseract(Path(temporary_name))
+                except MaterialError:
+                    ocr = OCRResult(text="", mean_confidence=None)
+                    if "embedded_ocr_unavailable" not in methods:
+                        methods.append("embedded_ocr_unavailable")
+                if ocr.text:
+                    parts.append(f"[{name}:OCR]\n{ocr.text}")
                     if "embedded_ocr" not in methods:
                         methods.append("embedded_ocr")
-            except MaterialError:
-                pass
+                if collector:
+                    collector.add(
+                        Path(temporary_name),
+                        source_file=f"{display_name or path.name}::{name}",
+                        source_sha256=source_sha256 or sha256_file(path),
+                        unit=f"embedded:{name}",
+                        page=None,
+                        reason="embedded_image",
+                        ocr=ocr,
+                    )
             finally:
                 if temporary_name:
                     Path(temporary_name).unlink(missing_ok=True)
@@ -121,13 +213,13 @@ def is_ole_file(path: Path) -> bool:
         return handle.read(8) == bytes.fromhex("d0cf11e0a1b11ae1")
 
 
-def run_tesseract(image: Path, timeout: int = 120) -> str:
+def run_tesseract(image: Path, timeout: int = 120) -> OCRResult:
     executable = shutil.which("tesseract")
     if not executable:
         raise MaterialError("tesseract unavailable")
     languages = "chi_sim+eng"
     completed = subprocess.run(
-        [executable, str(image), "stdout", "-l", languages, "--psm", "6"],
+        [executable, str(image), "stdout", "-l", languages, "--psm", "6", "tsv"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -136,18 +228,80 @@ def run_tesseract(image: Path, timeout: int = 120) -> str:
     )
     if completed.returncode != 0:
         raise MaterialError(completed.stderr.strip() or f"tesseract exited {completed.returncode}")
-    return completed.stdout.strip()
+    lines: dict[tuple[str, str, str, str], list[str]] = {}
+    weighted_confidence = 0.0
+    confidence_weight = 0
+    try:
+        rows = csv.DictReader(io.StringIO(completed.stdout), delimiter="\t")
+        for row in rows:
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            key = tuple(str(row.get(name) or "0") for name in ("page_num", "block_num", "par_num", "line_num"))
+            lines.setdefault(key, []).append(text)
+            try:
+                confidence = float(str(row.get("conf") or "-1"))
+            except ValueError:
+                confidence = -1
+            weight = max(1, normalized_char_count(text))
+            if confidence >= 0:
+                weighted_confidence += confidence * weight
+                confidence_weight += weight
+    except csv.Error as exc:
+        raise MaterialError(f"invalid tesseract TSV: {exc}") from exc
+    text = "\n".join(" ".join(words) for words in lines.values()).strip()
+    mean_confidence = round(weighted_confidence / confidence_weight, 2) if confidence_weight else None
+    return OCRResult(text=text, mean_confidence=mean_confidence)
 
 
-def extract_image(path: Path) -> tuple[str, list[str]]:
-    return run_tesseract(path), ["ocr"]
+def extract_image(
+    path: Path,
+    collector: VisionCollector | None = None,
+    display_name: str | None = None,
+    source_sha256: str | None = None,
+) -> tuple[str, list[str]]:
+    try:
+        ocr = run_tesseract(path)
+        methods = ["ocr", "vision_required"]
+    except MaterialError:
+        ocr = OCRResult(text="", mean_confidence=None)
+        methods = ["ocr_unavailable", "vision_required"]
+    if collector:
+        collector.add(
+            path,
+            source_file=display_name or path.name,
+            source_sha256=source_sha256 or sha256_file(path),
+            unit="image",
+            page=None,
+            reason="image_attachment",
+            ocr=ocr,
+        )
+    return ocr.text, methods
 
 
-def extract_pdf(path: Path) -> tuple[str, int, list[str], list[str]]:
+def has_large_page_image(page: object) -> bool:
+    try:
+        rect = page.rect  # type: ignore[attr-defined]
+        page_area = max(1.0, float(rect.width * rect.height))
+        return any(
+            float(image_rect.width * image_rect.height) / page_area >= 0.25
+            for image in page.get_images(full=True)  # type: ignore[attr-defined]
+            for image_rect in page.get_image_rects(image[0])  # type: ignore[attr-defined]
+        )
+    except Exception:
+        return False
+
+
+def extract_pdf(
+    path: Path,
+    collector: VisionCollector | None = None,
+    display_name: str | None = None,
+    source_sha256: str | None = None,
+) -> tuple[str, int, list[str], list[str]]:
     try:
         import fitz  # type: ignore
     except ImportError:
-        return extract_pdf_cli(path)
+        return extract_pdf_cli(path, collector, display_name, source_sha256)
 
     document = fitz.open(str(path))
     pages: list[str] = []
@@ -157,19 +311,38 @@ def extract_pdf(path: Path) -> tuple[str, int, list[str], list[str]]:
         for page_index in range(len(document)):
             page = document[page_index]
             text = page.get_text("text").strip()
-            if normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE:
+            has_native_text = normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE
+            large_image = has_large_page_image(page)
+            if has_native_text and not large_image:
                 methods.add("pdf_text")
             else:
                 temporary_name = ""
                 try:
-                    pixmap = page.get_pixmap(dpi=170, alpha=False)
+                    pixmap = page.get_pixmap(dpi=PDF_OCR_DPI, alpha=False)
                     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
                         temporary_name = handle.name
                     pixmap.save(temporary_name)
-                    ocr_text = run_tesseract(Path(temporary_name))
-                    if ocr_text:
-                        text = ocr_text
-                    methods.add("ocr")
+                    try:
+                        ocr = run_tesseract(Path(temporary_name))
+                        methods.add("ocr")
+                    except MaterialError:
+                        ocr = OCRResult(text="", mean_confidence=None)
+                        methods.add("ocr_unavailable")
+                    if has_native_text:
+                        methods.add("pdf_text")
+                    elif ocr.text:
+                        text = ocr.text
+                    if collector:
+                        collector.add(
+                            Path(temporary_name),
+                            source_file=display_name or path.name,
+                            source_sha256=source_sha256 or sha256_file(path),
+                            unit=f"page:{page_index + 1}",
+                            page=page_index + 1,
+                            reason="pdf_page_visual_content" if large_image else "pdf_page_without_text_layer",
+                            ocr=ocr,
+                        )
+                    methods.add("vision_required")
                 except Exception as exc:  # page-level failure remains auditable
                     failures.append(f"page:{page_index + 1}:{type(exc).__name__}")
                 finally:
@@ -181,7 +354,12 @@ def extract_pdf(path: Path) -> tuple[str, int, list[str], list[str]]:
     return "\n\n".join(pages), len(pages), sorted(methods), failures
 
 
-def extract_pdf_cli(path: Path) -> tuple[str, int, list[str], list[str]]:
+def extract_pdf_cli(
+    path: Path,
+    collector: VisionCollector | None = None,
+    display_name: str | None = None,
+    source_sha256: str | None = None,
+) -> tuple[str, int, list[str], list[str]]:
     pdftotext = shutil.which("pdftotext")
     pdfinfo = shutil.which("pdfinfo")
     pdftoppm = shutil.which("pdftoppm")
@@ -210,17 +388,32 @@ def extract_pdf_cli(path: Path) -> tuple[str, int, list[str], list[str]]:
             with tempfile.TemporaryDirectory(prefix="odm-pdf-page-") as directory:
                 prefix = Path(directory) / "page"
                 rendered = subprocess.run(
-                    [pdftoppm, "-f", str(page_number), "-l", str(page_number), "-r", "170", "-png", "-singlefile", str(path), str(prefix)],
+                    [pdftoppm, "-f", str(page_number), "-l", str(page_number), "-r", str(PDF_OCR_DPI), "-png", "-singlefile", str(path), str(prefix)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120, check=False,
                 )
                 image = prefix.with_suffix(".png")
                 try:
                     if rendered.returncode != 0 or not image.is_file():
                         raise MaterialError(rendered.stderr.strip() or "pdftoppm failed")
-                    ocr_text = run_tesseract(image)
-                    if ocr_text:
-                        text = ocr_text
-                    methods.add("ocr")
+                    try:
+                        ocr = run_tesseract(image)
+                        methods.add("ocr")
+                    except MaterialError:
+                        ocr = OCRResult(text="", mean_confidence=None)
+                        methods.add("ocr_unavailable")
+                    if ocr.text:
+                        text = ocr.text
+                    if collector:
+                        collector.add(
+                            image,
+                            source_file=display_name or path.name,
+                            source_sha256=source_sha256 or sha256_file(path),
+                            unit=f"page:{page_number}",
+                            page=page_number,
+                            reason="pdf_page_without_text_layer",
+                            ocr=ocr,
+                        )
+                    methods.add("vision_required")
                 except MaterialError as exc:
                     failures.append(f"page:{page_number}:{type(exc).__name__}")
         else:
@@ -318,7 +511,12 @@ def safe_archive_members(archive: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo
     return selected
 
 
-def extract_archive(path: Path, depth: int) -> tuple[str, list[str], list[str], list[dict[str, object]]]:
+def extract_archive(
+    path: Path,
+    depth: int,
+    collector: VisionCollector | None = None,
+    display_name: str | None = None,
+) -> tuple[str, list[str], list[str], list[dict[str, object]]]:
     if depth >= 2:
         raise MaterialError("nested archive depth exceeded")
     parts: list[str] = []
@@ -333,16 +531,22 @@ def extract_archive(path: Path, depth: int) -> tuple[str, list[str], list[str], 
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, target.open("wb") as destination:
                     shutil.copyfileobj(source, destination)
-                result = extract_material(target, depth + 1, display_name=decoded_name)
+                child_name = f"{display_name or path.name}::{decoded_name}"
+                result = extract_material(target, depth + 1, display_name=child_name, collector=collector)
                 children.append({key: value for key, value in asdict(result).items() if key != "text"})
                 if result.status not in {"complete", "ignored"}:
-                    failures.append(decoded_name)
+                    failures.append(child_name)
                 if result.text.strip():
-                    parts.append(f"--- {decoded_name} ---\n{result.text}")
+                    parts.append(f"--- {child_name} ---\n{result.text}")
     return "\n\n".join(parts), ["zip"], failures, children
 
 
-def extract_material(path: Path, depth: int = 0, display_name: str | None = None) -> ExtractionResult:
+def extract_material(
+    path: Path,
+    depth: int = 0,
+    display_name: str | None = None,
+    collector: VisionCollector | None = None,
+) -> ExtractionResult:
     name = display_name or path.name
     suffix = path.suffix.lower()
     methods: list[str] = []
@@ -351,6 +555,7 @@ def extract_material(path: Path, depth: int = 0, display_name: str | None = None
     pages: int | None = None
     text = ""
     ignored = False
+    source_sha256 = sha256_file(path)
     try:
         if path.stat().st_size == 0 and suffix == ".larkcache":
             ignored = True
@@ -361,17 +566,17 @@ def extract_material(path: Path, depth: int = 0, display_name: str | None = None
             if is_ole_file(path):
                 text, methods = extract_legacy_office(path)
             else:
-                text, methods = extract_ooxml(path)
+                text, methods = extract_ooxml(path, collector, name, source_sha256)
         elif suffix == ".pdf":
-            text, pages, methods, failures = extract_pdf(path)
+            text, pages, methods, failures = extract_pdf(path, collector, name, source_sha256)
         elif suffix in IMAGE_SUFFIXES:
-            text, methods = extract_image(path)
+            text, methods = extract_image(path, collector, name, source_sha256)
         elif suffix in {".doc", ".xls"}:
             text, methods = extract_legacy_office(path)
         elif suffix == ".larkcache" and ".m4a.larkcache" in path.name.lower():
             raise MaterialError("audio transcription unavailable")
         elif suffix == ".zip":
-            text, methods, failures, children = extract_archive(path, depth)
+            text, methods, failures, children = extract_archive(path, depth, collector, name)
         else:
             raise MaterialError(f"unsupported file type: {suffix or '<none>'}")
     except Exception as exc:
@@ -380,7 +585,7 @@ def extract_material(path: Path, depth: int = 0, display_name: str | None = None
     status = "ignored" if ignored else ("complete" if not failures else ("partial" if text.strip() else "failed"))
     return ExtractionResult(
         file_name=name,
-        sha256=sha256_file(path),
+        sha256=source_sha256,
         size=path.stat().st_size,
         status=status,
         text_chars=normalized_char_count(text),
@@ -432,6 +637,8 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--output-dir", type=Path, required=True)
     extract.add_argument("--manifest", type=Path, required=True)
     extract.add_argument("--corpus", type=Path, required=True)
+    extract.add_argument("--vision-dir", type=Path, required=True)
+    extract.add_argument("--vision-tasks", type=Path, required=True)
     return parser
 
 
@@ -441,11 +648,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         source = args.input_dir.resolve(strict=True)
         if not source.is_dir():
             raise MaterialError("input directory is not a directory")
-        results = [extract_material(path) for path in iter_material_files(source)]
+        collector = VisionCollector(args.vision_dir)
+        results = [extract_material(path, collector=collector) for path in iter_material_files(source)]
         if not results:
             raise MaterialError("no attachment files found")
         manifest = write_outputs(results, args.output_dir, args.manifest, args.corpus)
-        print(json.dumps(manifest["summary"], ensure_ascii=False, separators=(",", ":")))
+        vision = collector.write(args.vision_tasks)
+        output = dict(manifest["summary"])
+        output["vision_tasks"] = vision["summary"]["total"]
+        output["pdf_ocr_dpi"] = PDF_OCR_DPI
+        print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
         return 0
     except (MaterialError, OSError, zipfile.BadZipFile) as exc:
         print(json.dumps({"status": "failed", "error_code": "MATERIAL_EXTRACTION_FAILED", "message": str(exc)}, ensure_ascii=False), file=sys.stderr)

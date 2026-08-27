@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vision-evidence/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "source_sha256",
+    "image_sha256",
+    "producer",
+    "status",
+    "verbatim_text",
+    "critical_fields",
+    "tables",
+    "uncertain_regions"
+  ],
+  "properties": {
+    "schema_version": { "const": "vision-evidence/v1" },
+    "task_id": { "type": "string", "pattern": "^vis_[0-9a-f]{20}$" },
+    "source_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "image_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_name", "model"],
+      "properties": {
+        "agent_name": { "const": "纠纷材料视觉核验员" },
+        "model": { "const": "Doubao-Seed-2.1-turbo" }
+      }
+    },
+    "status": { "enum": ["complete", "partial", "failed"] },
+    "verbatim_text": { "type": "string" },
+    "critical_fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field_type", "visible_text", "normalized_value", "status", "source_ref"],
+        "properties": {
+          "field_type": { "type": "string", "minLength": 1 },
+          "visible_text": { "type": "string", "minLength": 1 },
+          "normalized_value": { "type": "string" },
+          "status": { "enum": ["clear", "unclear"] },
+          "source_ref": { "type": "string", "minLength": 1 }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "clear" } } },
+            "then": { "properties": { "normalized_value": { "minLength": 1 } } }
+          }
+        ]
+      }
+    },
+    "tables": { "type": "array" },
+    "uncertain_regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description", "critical"],
+        "properties": {
+          "description": { "type": "string" },
+          "critical": { "type": "boolean" },
+          "source_ref": { "type": "string" }
+        }
+      }
+    }
+  }
+}
