@@ -23,6 +23,7 @@ SCALAR_PATTERN = re.compile(r"\{\{([A-Za-z][A-Za-z0-9_]*)\}\}")
 ROW_PATTERN = re.compile(r"<!--([A-Za-z][A-Za-z0-9_]*_rows)-->")
 UNRESOLVED_PATTERN = re.compile(r"\{\{[^{}]+\}\}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
+NUMERIC_LITERAL_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?![A-Za-z0-9])")
 
 
 class ReportError(Exception):
@@ -264,7 +265,7 @@ def fact_values(facts: dict[str, Any], schema: dict[str, Any]) -> Iterable[str]:
     scalars = facts.get("scalars", {})
     if isinstance(scalars, dict):
         for name, value in scalars.items():
-            if name == "document_title":
+            if name in {"case_number", "document_title"}:
                 continue
             yield scalar_text(value, f"scalars.{name}")
     rows = facts.get("rows", {})
@@ -279,6 +280,36 @@ def fact_values(facts: dict[str, Any], schema: dict[str, Any]) -> Iterable[str]:
                     if column == "index":
                         continue
                     yield scalar_text(value, f"rows.{marker}[{index}].{column}")
+
+
+def numeric_literals(value: str) -> set[str]:
+    """Extract material numeric literals while ignoring short clause numbers."""
+
+    values: set[str] = set()
+    for match in NUMERIC_LITERAL_PATTERN.finditer(value):
+        literal = match.group(0).replace(",", "")
+        if len(literal.replace(".", "")) >= 4:
+            values.add(literal)
+    return values
+
+
+def validate_fact_evidence(facts: dict[str, Any], schema: dict[str, Any], source_corpus: str) -> dict[str, Any]:
+    """Require every material numeric fact to occur in extracted material text."""
+
+    corpus = re.sub(r"[\s,，]", "", source_corpus)
+    literals = set().union(*(numeric_literals(value) for value in fact_values(facts, schema)))
+    unsupported = sorted(
+        literal
+        for literal in literals
+        if not re.search(rf"(?<!\d){re.escape(literal)}(?!\d)", corpus)
+    )
+    if unsupported:
+        raise ReportError(
+            "FACT_NUMERIC_UNSUPPORTED",
+            "结构化事实含有未在材料文本或 OCR 文本中出现的数字",
+            {"values": unsupported[:20], "total": len(unsupported)},
+        )
+    return {"status": "valid", "numeric_literal_count": len(literals)}
 
 
 def validate_report(source: str, template: str, schema: dict[str, Any], facts: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -360,6 +391,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate", help="Validate local XML or lark-cli fetch JSON")
     validate.add_argument("--input", type=Path, required=True)
     validate.add_argument("--facts", type=Path)
+
+    evidence = subparsers.add_parser("validate-facts", help="Validate facts against extracted material text")
+    evidence.add_argument("--facts", type=Path, required=True)
+    evidence.add_argument("--source-corpus", type=Path, required=True)
     return parser
 
 
@@ -373,11 +408,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             atomic_write(args.output, output)
             result = validate_report(output, template, schema, facts)
             result.update({"output": str(args.output.expanduser().resolve()), "bytes": len(output.encode("utf-8"))})
-        else:
+        elif args.command == "validate":
             source = extract_document_content(args.input)
             facts = read_json(args.facts) if args.facts else None
             result = validate_report(source, template, schema, facts)
             result["input"] = str(args.input.expanduser().resolve())
+        else:
+            facts = read_json(args.facts)
+            try:
+                source_corpus = args.source_corpus.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ReportError("SOURCE_CORPUS_UNAVAILABLE", "无法读取材料文本或 OCR 汇总", {"reason": str(exc)}) from exc
+            result = validate_fact_evidence(facts, schema, source_corpus)
+            result["facts"] = str(args.facts.expanduser().resolve())
+            result["source_corpus"] = str(args.source_corpus.expanduser().resolve())
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
     except ReportError as exc:

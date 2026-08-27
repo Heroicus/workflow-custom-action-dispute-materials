@@ -1,6 +1,6 @@
 # 纠纷材料整理工作流组件
 
-当前发布版本：小组件 `6.1.1` / Skill `6.1.0`
+当前待发布版本：小组件 `6.1.2` / Skill `6.1.1`
 文档架构：固定 XML + 可执行渲染器 + 远端失败闭环
 
 ```text
@@ -23,7 +23,7 @@
 {
   "document_token": "报告 token",
   "processed_attachment_ids": ["已处理附件 ID"],
-  "contract_version": "6.1.0"
+  "contract_version": "6.1.1"
 }
 ```
 
@@ -51,6 +51,6 @@ targetRecordId = 第 1 步新增案件记录.Record ID
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v6.1.0.zip --json
-unzip -t output/organize-dispute-materials-v6.1.0.zip
+  --output output/organize-dispute-materials-v6.1.1.zip --json
+unzip -t output/organize-dispute-materials-v6.1.1.zip
 ```

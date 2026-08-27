@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取指定案件记录附件，用固定模板确定性生成或重写案件报告，并将权限、链接和案件字段写回同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.1.0"
+  version: "6.1.1"
   tier: STANDARD
   category: legal-automation
 ---
@@ -18,7 +18,7 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.1.0
+required_skill_version = 6.1.1
 app_token、table_id、record_id、dispatch_id、case_number 非空
 mode = initial | supplement
 ```
@@ -40,6 +40,11 @@ mode = initial | supplement
 案件事实只取自当前记录字段与附件正文。没有依据的字段保持空值。
 
 ### 2. 生成结构化事实
+
+先把本次实际读取到的附件正文、OCR 输出和可读取 Office 文本按附件 ID 汇总为
+`source-corpus.txt`。不得把模型总结、上一版报告、Base 执行日志或文档标题混入该文件。
+没有文本层的 PDF 必须先 OCR；OCR 失败时该附件只可作为“无法读取”的处理结果，不能据此
+补造日期、金额或页码。
 
 创建临时 `case-facts.json`：
 
@@ -66,6 +71,17 @@ mode = initial | supplement
 字段定义读取 `references/render-contract.md` 和 `references/render-schema.json`。重复事实合并；日期、金额仅统一展示格式，不改变材料含义或重新计算。
 
 不得自行生成材料没有记载的风险、建议、缺失材料、质证意见、待办、法律条文或胜诉概率。真正互相矛盾的原文才写入 `conflict_rows`；“我方胜诉”和“驳回对方全部请求”等语义一致表述不属于矛盾。
+
+在渲染前必须执行数字事实证据门：
+
+```bash
+python3 "$SKILL_ROOT/scripts/report_tool.py" validate-facts \
+  --facts case-facts.json \
+  --source-corpus source-corpus.txt
+```
+
+命令非零时，不得渲染、创建文档或回写成功。回到附件重新核对；不能证实的金额、日期或
+证件/账户数字保持空值，材料彼此不一致时登记到 `conflict_rows`，不得任选一个数字写入。
 
 ### 3. 确定性渲染
 
@@ -150,7 +166,7 @@ lark-cli drive +member-list --as user \
 
 ```text
 AI分析结果 = 报告 URL
-材料处理基线 = {"document_token":"...","processed_attachment_ids":[...],"contract_version":"6.1.0"}
+材料处理基线 = {"document_token":"...","processed_attachment_ids":[...],"contract_version":"6.1.1"}
 AI处理状态 = 已完成
 执行日志/失败原因 = 任务 <dispatch_id>：已完成
 ```
