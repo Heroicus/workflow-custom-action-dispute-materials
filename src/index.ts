@@ -8,16 +8,16 @@ import {
   buildAnalysisPrompt,
   DispatchMode,
   hasMeaningfulFieldValue,
-  parseReportDocxReference,
   PRODUCTION_APP_TOKEN,
   PRODUCTION_FIELD_CONTRACT,
   PRODUCTION_TABLE_ID,
   REQUIRED_SKILL_VERSION,
+  resolveReportDocxReference,
 } from "./analysis";
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.5.2-supplement-link";
+const BUILD_ID = "6.5.3-supplement-link";
 const REQUEST_TIMEOUT_MS = 10_000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
 const RECORD_QUEUES = new Map<string, Promise<void>>();
@@ -334,9 +334,9 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
 
   const reportField = fieldValue(fields, FIELD_ANALYSIS_RESULT);
   const baselineField = fieldValue(fields, BASELINE_FIELD_NAME);
-  const report = parseReportDocxReference(reportField);
   const baseline = parseBaseline(baselineField);
-  if (!hasMeaningfulFieldValue(reportField) && !hasMeaningfulFieldValue(baselineField)) {
+  const hasReportField = hasMeaningfulFieldValue(reportField);
+  if (!hasReportField && !hasMeaningfulFieldValue(baselineField)) {
     return {
       kind: "initial",
       attachmentIds: attachmentIdList,
@@ -345,7 +345,8 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
       uploaderOpenIds: uploaderIdList,
     };
   }
-  if (!baseline || !report || report.documentToken !== baseline.documentToken) {
+  const report = baseline ? resolveReportDocxReference(reportField, baseline.documentToken) : undefined;
+  if (!baseline || !report) {
     throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前报告链接与材料处理基线不一致");
   }
   const reportUrl = report.url;

@@ -10,6 +10,14 @@ export type ReportDocxReference = {
   documentToken: string;
 };
 
+export function reportDocxReferenceFromToken(documentToken: string): ReportDocxReference | undefined {
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(documentToken)) return undefined;
+  return {
+    documentToken,
+    url: `${REPORT_DOCX_ORIGIN}/docx/${documentToken}`,
+  };
+}
+
 function collectStrings(value: unknown, output: string[], seen: Set<unknown>): void {
   if (typeof value === "string") {
     output.push(value);
@@ -42,13 +50,22 @@ export function parseReportDocxReference(value: unknown): ReportDocxReference | 
     REPORT_DOCX_PATTERN.lastIndex = 0;
     for (const match of text.matchAll(REPORT_DOCX_PATTERN)) {
       const documentToken = match[1];
-      references.set(documentToken, {
-        documentToken,
-        url: `${REPORT_DOCX_ORIGIN}/docx/${documentToken}`,
-      });
+      references.set(documentToken, reportDocxReferenceFromToken(documentToken)!);
     }
   }
   return references.size === 1 ? references.values().next().value : undefined;
+}
+
+export function resolveReportDocxReference(
+  value: unknown,
+  baselineDocumentToken: string,
+): ReportDocxReference | undefined {
+  if (!hasMeaningfulFieldValue(value)) return undefined;
+  const baselineReference = reportDocxReferenceFromToken(baselineDocumentToken);
+  if (!baselineReference) return undefined;
+  const parsedReference = parseReportDocxReference(value);
+  if (parsedReference && parsedReference.documentToken !== baselineDocumentToken) return undefined;
+  return parsedReference || baselineReference;
 }
 
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";
