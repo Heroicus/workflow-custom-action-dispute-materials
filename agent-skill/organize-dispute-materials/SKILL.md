@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.5.2"
+  version: "6.5.3"
   tier: STANDARD
   category: legal-automation
 ---
@@ -16,7 +16,7 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.5.2
+required_skill_version = 6.5.3
 app_token、table_id、record_id、dispatch_id、case_number 非空
 mode = initial | supplement
 model_contract = Deepseek-V4-Pro 主写入 + Doubao-Seed-2.1-turbo 只读视觉 + Feishu Minutes 音频逐字稿
@@ -205,6 +205,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate-permission \
 ```
 
 权限成功门必须是协作者列表远端读回精确包含上传人 open_id 和 `full_access`；只看到添加接口成功不得返回完成。
+禁止复制、改名或转换 `permission-add.json` 作为 `permission-readback.json`；`+member-list` 不可用、缺 scope 或返回失败时，必须按 `DOC_PERMISSION_READBACK_INVALID` 失败回写，不得继续成功回写。
 
 ### 8. 回写 Base 并读回
 

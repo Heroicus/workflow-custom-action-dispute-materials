@@ -41,8 +41,8 @@ NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v1"
 AUDIO_PACK_SCHEMA = "audio-evidence-pack/v1"
 EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.5"
-EXPECTED_SKILL_VERSION = "6.5.2"
-EXPECTED_COMPONENT_BUILD = "6.5.4-skill-6.5.2"
+EXPECTED_SKILL_VERSION = "6.5.3"
+EXPECTED_COMPONENT_BUILD = "6.5.5-skill-6.5.3"
 NON_EVIDENCE_NAME_PATTERN = re.compile(
     r"送达地址确认书|证据材料清单|证据目录|起诉状|仲裁申请书|答辩书|质证意见|裁决书|判决书|庭审笔录"
 )
@@ -1211,15 +1211,32 @@ def validate_writeback(readback: Path, expectation: dict[str, Any]) -> dict[str,
 
 def validate_permission(path: Path, member_id: str) -> dict[str, Any]:
     roots = read_response_values(path)
-    strings: list[str] = []
+    list_response_seen = False
+    list_items: list[dict[str, Any]] = []
     for root in roots:
         for value in walk_values(root):
-            if isinstance(value, (str, int, float, bool)):
-                strings.append(str(value))
-    if member_id not in strings or "full_access" not in strings:
+            if not isinstance(value, dict) or value.get("ok") is not True:
+                continue
+            data = value.get("data")
+            items = data.get("items") if isinstance(data, dict) else None
+            if isinstance(items, list):
+                list_response_seen = True
+                list_items.extend(item for item in items if isinstance(item, dict))
+    if not list_response_seen:
         raise ReportError(
-            "DOC_PERMISSION_GRANT_FAILED", "权限添加响应未返回目标上传人和 full_access",
-            {"member_id_found": member_id in strings, "full_access_found": "full_access" in strings},
+            "DOC_PERMISSION_READBACK_INVALID",
+            "权限校验输入不是协作者列表远端读回",
+            {"required_shape": "ok=true,data.items[]"},
+        )
+    matched = [item for item in list_items if scalarish(item.get("member_id")) == member_id]
+    if not any(scalarish(item.get("perm")) == "full_access" for item in matched):
+        raise ReportError(
+            "DOC_PERMISSION_GRANT_FAILED",
+            "协作者列表读回未包含目标上传人的 full_access",
+            {
+                "member_id_found": bool(matched),
+                "permissions": sorted({scalarish(item.get("perm")) for item in matched}),
+            },
         )
     return {"status": "valid", "member_id": member_id, "permission": "full_access"}
 

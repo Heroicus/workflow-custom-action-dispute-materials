@@ -1,6 +1,6 @@
 export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.5";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.5.2";
+export const REQUIRED_SKILL_VERSION = "6.5.3";
 
 const REPORT_DOCX_ORIGIN = "https://aixuexi.feishu.cn";
 const REPORT_DOCX_PATTERN = /https:\/\/aixuexi\.feishu\.cn\/docx\/([A-Za-z0-9_-]{8,128})(?=$|[\s)\]}>,'"?&#])/g;
