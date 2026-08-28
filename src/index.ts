@@ -7,6 +7,8 @@ import {
   BASELINE_FIELD_NAME,
   buildAnalysisPrompt,
   DispatchMode,
+  hasMeaningfulFieldValue,
+  parseReportDocxReference,
   PRODUCTION_APP_TOKEN,
   PRODUCTION_FIELD_CONTRACT,
   PRODUCTION_TABLE_ID,
@@ -15,7 +17,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.5.1-table-layout";
+const BUILD_ID = "6.5.2-supplement-link";
 const REQUEST_TIMEOUT_MS = 10_000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
 const RECORD_QUEUES = new Map<string, Promise<void>>();
@@ -298,15 +300,6 @@ function isDocumentToken(value: string): boolean {
   return /^[A-Za-z0-9_-]{8,128}$/.test(value);
 }
 
-function isHttpsDocxUrl(value: string): boolean {
-  return /^https:\/\/[^/]+\/docx\/[A-Za-z0-9_-]+$/.test(value);
-}
-
-function tokenFromDocxUrl(value: string): string {
-  const match = value.match(/\/docx\/([A-Za-z0-9_-]+)$/);
-  return match ? match[1] : "";
-}
-
 function parseBaseline(value: unknown): MaterialBaseline | undefined {
   const text = scalarText(value);
   if (!text) return undefined;
@@ -339,9 +332,11 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
   const caseNumber = scalarText(fieldValue(fields, FIELD_CASE_NUMBER));
   if (!caseNumber) throw new DispatchFailure("CASE_NUMBER_MISSING", "inspect-materials", "案件编号为空");
 
-  const reportUrl = scalarText(fieldValue(fields, FIELD_ANALYSIS_RESULT));
-  const baseline = parseBaseline(fieldValue(fields, BASELINE_FIELD_NAME));
-  if (!baseline && !isHttpsDocxUrl(reportUrl)) {
+  const reportField = fieldValue(fields, FIELD_ANALYSIS_RESULT);
+  const baselineField = fieldValue(fields, BASELINE_FIELD_NAME);
+  const report = parseReportDocxReference(reportField);
+  const baseline = parseBaseline(baselineField);
+  if (!hasMeaningfulFieldValue(reportField) && !hasMeaningfulFieldValue(baselineField)) {
     return {
       kind: "initial",
       attachmentIds: attachmentIdList,
@@ -350,9 +345,10 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
       uploaderOpenIds: uploaderIdList,
     };
   }
-  if (!baseline || !isHttpsDocxUrl(reportUrl) || tokenFromDocxUrl(reportUrl) !== baseline.documentToken) {
+  if (!baseline || !report || report.documentToken !== baseline.documentToken) {
     throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前报告链接与材料处理基线不一致");
   }
+  const reportUrl = report.url;
   const currentSet = new Set(attachmentIdList);
   if (baseline.processedAttachmentIds.some((id) => !currentSet.has(id))) {
     throw new DispatchFailure("ATTACHMENT_SET_CHANGED", "inspect-materials", "已有附件被删除或替换");
@@ -615,8 +611,7 @@ basekit.addAction({
           ? error
           : new DispatchFailure("MATERIAL_PREFLIGHT_FAILED", "inspect-materials", safeMessage(error));
         dispatchId = makeDispatchId(target.recordId);
-        const hasValidReport = isHttpsDocxUrl(scalarText(fieldValue(fields, FIELD_ANALYSIS_RESULT)));
-        const written = await markFailure(context, token, target, dispatchId, failure.code, !hasValidReport);
+        const written = await markFailure(context, token, target, dispatchId, failure.code, false);
         return result(target, dispatchId, {
           accepted: false,
           dispatchState: "failed",

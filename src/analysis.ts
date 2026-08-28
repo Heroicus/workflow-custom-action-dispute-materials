@@ -2,6 +2,55 @@ export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.5";
 export const DISPATCH_OPERATION = "process_target_record";
 export const REQUIRED_SKILL_VERSION = "6.5.1";
 
+const REPORT_DOCX_ORIGIN = "https://aixuexi.feishu.cn";
+const REPORT_DOCX_PATTERN = /https:\/\/aixuexi\.feishu\.cn\/docx\/([A-Za-z0-9_-]{8,128})(?=$|[\s)\]}>,'"?&#])/g;
+
+export type ReportDocxReference = {
+  url: string;
+  documentToken: string;
+};
+
+function collectStrings(value: unknown, output: string[], seen: Set<unknown>): void {
+  if (typeof value === "string") {
+    output.push(value);
+    return;
+  }
+  if (value === null || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, output, seen);
+    return;
+  }
+  for (const item of Object.values(value as Record<string, unknown>)) {
+    collectStrings(item, output, seen);
+  }
+}
+
+export function hasMeaningfulFieldValue(value: unknown): boolean {
+  if (typeof value === "string") return Boolean(value.trim());
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.some(hasMeaningfulFieldValue);
+  if (value === null || typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).some(hasMeaningfulFieldValue);
+}
+
+export function parseReportDocxReference(value: unknown): ReportDocxReference | undefined {
+  const strings: string[] = [];
+  collectStrings(value, strings, new Set());
+  const references = new Map<string, ReportDocxReference>();
+  for (const text of strings) {
+    REPORT_DOCX_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(REPORT_DOCX_PATTERN)) {
+      const documentToken = match[1];
+      references.set(documentToken, {
+        documentToken,
+        url: `${REPORT_DOCX_ORIGIN}/docx/${documentToken}`,
+      });
+    }
+  }
+  return references.size === 1 ? references.values().next().value : undefined;
+}
+
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";
 export const PRODUCTION_TABLE_ID = "tbllz7nrxSIH8frX";
 export const BASELINE_FIELD_NAME = "材料处理基线";
