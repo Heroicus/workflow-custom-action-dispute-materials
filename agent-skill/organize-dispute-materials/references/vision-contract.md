@@ -28,6 +28,8 @@
 - `producer.agent_name` 固定为 `纠纷材料视觉核验员`；
 - `producer.model` 固定为 `Doubao-Seed-2.1-turbo`。
 
+禁止使用 `field_name`、顶层 `visible_text` 或 `status=inferred_from_context` 等自定义字段和值；顶层正文键必须是 `verbatim_text`，关键字段键必须是 `field_type / visible_text / normalized_value / status / source_ref`。任何上下文推断都不是视觉证据。
+
 ## 成功门
 
-主智能体把每项结果保存到 `extracted/vision-results/<task_id>.json`，再运行 `vision_tool.py reconcile`。证据包会绑定视觉任务文件、原始语料、最终语料、原文件和图片的 SHA-256；缺少结果、来源哈希不一致、关键字段无逐字转录支持或仍有关键内容不清楚时，整个案件不得返回完成。
+主智能体只允许去除代码围栏后，把每项原始结果保存到 `extracted/vision-results/<task_id>.json`，不得改名字段、补字段、转换 schema 或手工重写，再运行 `vision_tool.py reconcile`。证据包会绑定视觉任务文件、原始语料、最终语料、原文件和图片的 SHA-256；缺少结果、来源哈希不一致、关键字段无逐字转录支持、返回包含推断或仍有关键内容不清楚时，整个案件不得返回完成。

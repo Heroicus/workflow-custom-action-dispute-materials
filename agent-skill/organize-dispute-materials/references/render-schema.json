@@ -1,5 +1,5 @@
 {
-  "schema_version": "6.5.1",
+  "schema_version": "6.5.2",
   "template": "report-template.xml",
   "required_scalars": [
     "case_number"
@@ -52,7 +52,22 @@
     "vision-evidence",
     "audio-evidence",
     "material_tool.py",
-    "report_tool.py"
+    "report_tool.py",
+    "verified-source-corpus",
+    "vision-source-corpus",
+    "source-corpus.txt",
+    "case-facts.json",
+    "runtime.json",
+    "视觉核验",
+    "音频核验",
+    "Tesseract",
+    "OCR",
+    "vision-task",
+    "audio-task",
+    "任务schema",
+    "解析method",
+    "调用参数",
+    "运行日志"
   ],
   "dynamic_rows": {
     "request_rows": ["index", "request", "category", "amount", "basis", "evidence"],

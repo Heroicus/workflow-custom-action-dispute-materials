@@ -1,7 +1,7 @@
 # 纠纷材料整理工作流组件
 
-当前待发布版本：小组件 `6.5.3` / Skill `6.5.1`
-本补丁兼容 Base OpenAPI 读取超链接文本时只返回显示标题的行为：机器端以材料处理基线中的文档 token 构造原报告 URL；预检失败仍保留既有报告链接和基线。
+当前待发布版本：小组件 `6.5.4` / Skill `6.5.2`
+本补丁兼容 Base OpenAPI 读取超链接文本时只返回显示标题的行为，并补齐运行信封 build 一致性、分段金额语义、用户正文过程泄露和协作者权限远端读回校验。
 文档架构：全附件提取 + Tesseract/豆包视觉双路核验 + 飞书妙记音频逐字稿 + DeepSeek 单写入 + 完整事实脚手架 + 固定 XML + 实际回写校验
 
 ```text
@@ -24,7 +24,7 @@
 {
   "document_token": "报告 token",
   "processed_attachment_ids": ["已处理附件 ID"],
-  "contract_version": "6.5.1",
+  "contract_version": "6.5.2",
   "audio_minutes": {
     "音频 SHA-256": {
       "file_token": "云盘文件 token",
@@ -60,6 +60,6 @@ targetRecordId = 第 1 步新增案件记录.Record ID
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v6.5.1.zip --json
-unzip -t output/organize-dispute-materials-v6.5.1.zip
+  --output output/organize-dispute-materials-v6.5.2.zip --json
+unzip -t output/organize-dispute-materials-v6.5.2.zip
 ```

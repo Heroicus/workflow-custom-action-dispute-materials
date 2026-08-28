@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.5.1"
+  version: "6.5.2"
   tier: STANDARD
   category: legal-automation
 ---
@@ -16,13 +16,13 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.5.1
+required_skill_version = 6.5.2
 app_token、table_id、record_id、dispatch_id、case_number 非空
 mode = initial | supplement
 model_contract = Deepseek-V4-Pro 主写入 + Doubao-Seed-2.1-turbo 只读视觉 + Feishu Minutes 音频逐字稿
 ```
 
-`record_id` 是唯一定位键。保存完整信封为 `runtime.json`；不搜索其他记录。
+`record_id` 是唯一定位键。将收到的完整信封逐字节保存为 `runtime.json`；不得修改 `required_skill_version`、`component_build` 或其他字段来绕过校验，不搜索其他记录。
 
 ## 执行
 
@@ -61,7 +61,7 @@ python3 "$SKILL_ROOT/scripts/material_tool.py" extract \
 2. 必须同时传入任务 JSON 和 `image_path` 指向的原始图片，不能只传 OCR 文本；
 3. 子智能体必须固定使用 Doubao-Seed-2.1-turbo；
 4. 子智能体只逐字转录图片并返回 `vision-evidence/v1` JSON，不得填写事实、生成报告或读写飞书；
-5. 把纯 JSON 保存为 `extracted/vision-results/<task_id>.json`。
+5. 只允许去掉 Markdown 代码围栏后，把子智能体原始 JSON 保存为 `extracted/vision-results/<task_id>.json`；不得改名字段、补字段、转换 schema、删除推断项或手工重写结果。返回不合约时重试一次，仍不合约则失败。
 
 输出契约见 `references/vision-contract.md` 和 `references/vision-result-schema.json`。全部任务完成后执行：
 
@@ -115,9 +115,9 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" scaffold \
 - Base 案件编号与法院/仲裁案号分栏，禁止混用；一条记录包含多个关联案件或多个我方主体时，必须在当事人、关联案件、程序记录和矛盾登记中全部展开，不得只取第一个；
 - 核心事实有明确依据就填写；材料未写明填 `未载明`，字段不适用填 `不适用`，来源冲突或字迹无法唯一确认填 `待核` 并同步写入矛盾登记。只有整理人、审核人、负责人、期限等人工操作字段保留真空白；
 - `evidence_rows` 只填写正式证据项，不得把送达地址确认书、起诉状、申请书、答辩书、证据材料清单、裁判文书、庭审笔录或内部工作底稿当作证据；`completeness_rows` 必须覆盖全部材料；
-- 请求金额只来自当前请求事项。协议补偿、已付款、银行流水或裁判认定金额如果不是当前请求，不得写入“本金/应退款项”；
-- 身份证号、手机号和银行卡号必须脱敏；报告正文不得出现模型名、工具名、任务 schema、解析 method、调用参数或运行日志；
-- 不删除 `completeness_rows` 中的材料项；`quality_rows` 必须完整填写材料读取、事实来源、当前程序、金额、空值和内部过程泄露六项检查；
+- 请求金额只来自当前请求事项。协议补偿、已付款、银行流水或裁判认定金额如果不是当前请求，不得写入“本金/应退款项”；只有当前请求明确包含利息、违约金、资金占用费或逾期费用，且材料同时支持期间、基数、日利率、天数和当期金额时，才填写 7.2 分段计算明细，否则该表不生成数据行；
+- 身份证号、手机号和银行卡号必须脱敏；报告正文不得出现模型名、工具名、内部文件名、视觉/音频处理方式、任务 schema、解析 method、调用参数或运行日志；
+- 不删除 `completeness_rows` 中的材料项；`quality_rows` 必须完整填写材料读取、事实来源、当前程序、金额、空值和内部过程泄露六项检查。检查结果只写用户可理解的业务结论，例如“全部事实均可追溯至案件材料”，不得写 `verified-source-corpus.txt`、视觉核验、音频核验或任何内部实现名；
 - 裁决书或判决书已经记载结果时，同时填写第九章、`case_status` 和 `base_fields.case_status`；
 - `base_fields` 填写案件名称、案件类型、立案日期、案件状态；无依据字段留空。
 
@@ -196,11 +196,15 @@ lark-cli drive +member-add --as user \
   --member-type openid --member-id "$uploader_open_id" \
   --perm full_access --yes --format json > permission-add.json
 
+lark-cli drive +member-list --as user \
+  --token "$document_token" --type docx \
+  --format json > permission-readback.json
+
 python3 "$SKILL_ROOT/scripts/report_tool.py" validate-permission \
-  --input permission-add.json --member-id "$uploader_open_id"
+  --input permission-readback.json --member-id "$uploader_open_id"
 ```
 
-当前运行时不提供协作者列表命令，因此以添加接口返回的精确 open_id 和 `full_access` 作为成功门。
+权限成功门必须是协作者列表远端读回精确包含上传人 open_id 和 `full_access`；只看到添加接口成功不得返回完成。
 
 ### 8. 回写 Base 并读回
 

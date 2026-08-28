@@ -77,7 +77,7 @@ Base 精确读写
 - 报告通过 `report_tool.py` 的本地与远端读回校验；
 - `vision_tool.py` 已读回并校验全部视觉子任务，关键字段不存在未决项；
 - `audio_tool.py` 已远端读回并校验全部音频逐字稿，证据包与最终语料哈希一致；
-- 权限添加响应精确返回上传人 open_id 和 `full_access`；
+- 协作者列表远端读回精确包含上传人 open_id 和 `full_access`；
 - 文档写入和 Base 回写前均重新读回当前记录，确认 `AI处理状态=分析中` 且执行日志精确等于 `任务 <dispatch_id>：处理中`；
 - 四个案件业务字段、报告 URL、材料基线、AI 状态和执行日志已从同一 `record_id` 读回。
 
@@ -92,4 +92,5 @@ minutes:minutes.upload:write
 minutes:minutes.basic:read
 minutes:minutes.artifacts:read
 docs:permission.member:create
+docs:permission.member:retrieve
 ```

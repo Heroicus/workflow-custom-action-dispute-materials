@@ -41,8 +41,8 @@ NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v1"
 AUDIO_PACK_SCHEMA = "audio-evidence-pack/v1"
 EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.5"
-EXPECTED_SKILL_VERSION = "6.5.1"
-EXPECTED_COMPONENT_BUILD = "6.5.1-table-layout"
+EXPECTED_SKILL_VERSION = "6.5.2"
+EXPECTED_COMPONENT_BUILD = "6.5.4-skill-6.5.2"
 NON_EVIDENCE_NAME_PATTERN = re.compile(
     r"送达地址确认书|证据材料清单|证据目录|起诉状|仲裁申请书|答辩书|质证意见|裁决书|判决书|庭审笔录"
 )
@@ -531,6 +531,33 @@ def validate_semantic_completion(
                 "CALCULATION_NOT_REQUEST_BACKED", "金额汇总不得把已支付款或证据金额误写为诉讼请求金额",
                 {"field": name, "values": sorted(unsupported)},
             )
+
+    calculation_rows = rows.get("calculation_detail_rows", [])
+    has_calculation_request = any(
+        re.search(r"利息|违约金|资金占用|逾期", " ".join(
+            scalarish(value) for key, value in row.items() if key != "index"
+        ))
+        for row in rows.get("request_rows", []) if isinstance(row, dict)
+    )
+    if calculation_rows and not has_calculation_request:
+        raise ReportError(
+            "CALCULATION_SECTION_MISUSED",
+            "没有利息、违约金或资金占用请求时，7.2 分段计算明细必须为空",
+        )
+    incomplete_calculations: list[int] = []
+    for index, row in enumerate(calculation_rows):
+        if not isinstance(row, dict):
+            continue
+        if scalarish(row.get("amount")) and (
+            not scalarish(row.get("daily_rate")) or not scalarish(row.get("days"))
+        ):
+            incomplete_calculations.append(index)
+    if incomplete_calculations:
+        raise ReportError(
+            "CALCULATION_DETAIL_INCOMPLETE",
+            "7.2 分段计算明细填写金额时必须同时有材料支持的日利率和天数",
+            {"rows": incomplete_calculations[:20]},
+        )
 
     truncated: list[str] = []
     for index, row in enumerate(rows.get("our_argument_rows", [])):
