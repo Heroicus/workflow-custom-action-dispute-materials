@@ -17,7 +17,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.6.0-skill-6.6.0";
+const BUILD_ID = "6.7.0-skill-6.7.0";
 const REQUEST_TIMEOUT_MS = 10_000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
 const RECORD_QUEUES = new Map<string, Promise<void>>();
@@ -60,6 +60,13 @@ type MaterialBaseline = {
   documentToken: string;
   processedAttachmentIds: string[];
   contractVersion: string;
+  appToken: string;
+  tableId: string;
+  recordId: string;
+  caseNumber: string;
+  reportUrl: string;
+  documentRevisionId: number | undefined;
+  reportContentSha256: string;
 };
 
 type MaterialDecision =
@@ -233,16 +240,29 @@ async function getRecord(context: RuntimeContext, token: string, target: Target)
 }
 
 async function getTableFields(context: RuntimeContext, token: string): Promise<UnknownRecord[]> {
-  const data = await fetchJson(
-    context,
-    token,
-    `${OPEN_API}/bitable/v1/apps/${encodeURIComponent(PRODUCTION_APP_TOKEN)}/tables/${encodeURIComponent(PRODUCTION_TABLE_ID)}/fields?page_size=100`,
-    { method: "GET" },
-    "read-table-schema",
-  );
-  const items = Array.isArray(data?.items) ? data.items : Array.isArray(data?.fields) ? data.fields : [];
+  const items: UnknownRecord[] = [];
+  let pageToken = "";
+  for (let page = 0; page < 100; page += 1) {
+    const query = new URLSearchParams({ page_size: "100" });
+    if (pageToken) query.set("page_token", pageToken);
+    const data = await fetchJson(
+      context,
+      token,
+      `${OPEN_API}/bitable/v1/apps/${encodeURIComponent(PRODUCTION_APP_TOKEN)}/tables/${encodeURIComponent(PRODUCTION_TABLE_ID)}/fields?${query.toString()}`,
+      { method: "GET" },
+      "read-table-schema",
+    );
+    const pageItems = Array.isArray(data?.items) ? data.items : Array.isArray(data?.fields) ? data.fields : [];
+    items.push(...pageItems.filter(isRecord));
+    if (!data?.has_more) break;
+    const nextToken = scalarText(data?.page_token);
+    if (!nextToken || nextToken === pageToken) {
+      throw new DispatchFailure("SCHEMA_UNAVAILABLE", "read-table-schema", "字段分页回执缺少下一页标识");
+    }
+    pageToken = nextToken;
+  }
   if (!items.length) throw new DispatchFailure("SCHEMA_UNAVAILABLE", "read-table-schema", "目标数据表未返回字段定义");
-  return items.filter(isRecord);
+  return items;
 }
 
 async function updateRecord(
@@ -316,13 +336,25 @@ function parseBaseline(value: unknown): MaterialBaseline | undefined {
     const processedAttachmentIds = [...new Set(rawIds.filter(Boolean))].sort();
     if (!processedAttachmentIds.length) return undefined;
     const contractVersion = scalarText(parsed.contract_version);
-    return { documentToken, processedAttachmentIds, contractVersion };
+    const documentRevisionId = Number(parsed.document_revision_id);
+    return {
+      documentToken,
+      processedAttachmentIds,
+      contractVersion,
+      appToken: scalarText(parsed.app_token),
+      tableId: scalarText(parsed.table_id),
+      recordId: scalarText(parsed.record_id),
+      caseNumber: scalarText(parsed.case_number),
+      reportUrl: scalarText(parsed.report_url),
+      documentRevisionId: Number.isInteger(documentRevisionId) && documentRevisionId >= 0 ? documentRevisionId : undefined,
+      reportContentSha256: scalarText(parsed.report_content_sha256),
+    };
   } catch {
     return undefined;
   }
 }
 
-function decideMaterials(fields: UnknownRecord): MaterialDecision {
+function decideMaterials(fields: UnknownRecord, recordId: string): MaterialDecision {
   const attachmentIdList = attachmentIds(fieldValue(fields, FIELD_ATTACHMENTS));
   if (!attachmentIdList.length) throw new DispatchFailure("ATTACHMENTS_MISSING", "inspect-materials", "案件文档为空");
   const uploaderIdList = uploaderOpenIds(fieldValue(fields, FIELD_UPLOADER));
@@ -345,7 +377,21 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
       uploaderOpenIds: uploaderIdList,
     };
   }
-  const report = baseline ? resolveReportDocxReference(reportField, baseline.documentToken) : undefined;
+  const currentBaseline = baseline?.contractVersion === REQUIRED_SKILL_VERSION;
+  if (currentBaseline && baseline && (
+    baseline.appToken !== PRODUCTION_APP_TOKEN
+    || baseline.tableId !== PRODUCTION_TABLE_ID
+    || baseline.recordId !== recordId
+    || baseline.caseNumber !== caseNumber
+    || baseline.reportUrl !== `https://aixuexi.feishu.cn/docx/${baseline.documentToken}`
+    || baseline.documentRevisionId === undefined
+    || !/^[0-9a-f]{64}$/.test(baseline.reportContentSha256)
+  )) {
+    throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前材料处理基线未绑定本案件记录和远端报告版本");
+  }
+  const report = baseline
+    ? resolveReportDocxReference(reportField, baseline.documentToken, Boolean(currentBaseline))
+    : undefined;
   if (!baseline || !report) {
     throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前报告链接与材料处理基线不一致");
   }
@@ -354,7 +400,7 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
   if (baseline.processedAttachmentIds.some((id) => !currentSet.has(id))) {
     throw new DispatchFailure("ATTACHMENT_SET_CHANGED", "inspect-materials", "已有附件被删除或替换");
   }
-  if (baseline.contractVersion !== REQUIRED_SKILL_VERSION) {
+  if (!currentBaseline) {
     return {
       kind: "supplement",
       attachmentIds: attachmentIdList,
@@ -367,15 +413,6 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
   }
   const processed = new Set(baseline.processedAttachmentIds);
   const newAttachmentIds = attachmentIdList.filter((id) => !processed.has(id));
-  if (!newAttachmentIds.length) {
-    return {
-      kind: "no_op",
-      attachmentIds: attachmentIdList,
-      newAttachmentIds: [],
-      caseNumber,
-      uploaderOpenIds: uploaderIdList,
-    };
-  }
   return {
     kind: "supplement",
     attachmentIds: attachmentIdList,
@@ -390,7 +427,7 @@ function decideMaterials(fields: UnknownRecord): MaterialDecision {
 function makeDispatchId(recordId: string): string {
   const stamp = Date.now();
   const nonce = Math.random().toString(36).slice(2, 8);
-  return `odm-v66:${recordId}:${stamp}:${nonce}`;
+  return `odm-v67:${recordId}:${stamp}:${nonce}`;
 }
 
 function taskLog(dispatchId: string, message: string): string {
@@ -407,6 +444,16 @@ function schemaId(field: UnknownRecord): string {
 
 function schemaType(field: UnknownRecord): string {
   return scalarText(field.type || field.field_type || field.fieldType);
+}
+
+function schemaOptions(field: UnknownRecord): string[] {
+  const property = isRecord(field.property) ? field.property : {};
+  const values = Array.isArray(property.options)
+    ? property.options
+    : Array.isArray(field.options)
+      ? field.options
+      : [];
+  return values.map((item) => scalarText(item)).filter(Boolean);
 }
 
 const FIELD_TYPE_ALIASES: Record<string, string[]> = {
@@ -430,6 +477,13 @@ function validateSchema(fields: UnknownRecord[]): void {
     const allowedTypes = FIELD_TYPE_ALIASES[contract.type] || [contract.type];
     if (actualType && !allowedTypes.includes(actualType)) {
       throw new DispatchFailure("FIELD_CONTRACT_MISMATCH", "validate-schema", `字段类型不匹配：${contract.name}`);
+    }
+    if ("options" in contract) {
+      const actualOptions = schemaOptions(actual);
+      const missingOptions = contract.options.filter((option) => !actualOptions.includes(option));
+      if (missingOptions.length) {
+        throw new DispatchFailure("FIELD_CONTRACT_MISMATCH", "validate-schema", `字段选项不匹配：${contract.name}`);
+      }
     }
   }
 }
@@ -476,7 +530,7 @@ async function markFailure(
   }, "mark-failure");
   const readback = await getRecord(context, token, target);
   return scalarText(fieldValue(readback, FIELD_PROCESSING_STATUS)) === "分析失败"
-    && scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)).includes(code);
+    && scalarText(fieldValue(readback, FIELD_EXECUTION_LOG)) === taskLog(dispatchId, `失败：${code}`);
 }
 
 async function currentAttemptOwnsRecord(
@@ -594,7 +648,7 @@ basekit.addAction({
       const status = scalarText(fieldValue(fields, FIELD_PROCESSING_STATUS));
       if (status === "分析中") {
         return result(target, "", {
-          accepted: true,
+          accepted: false,
           dispatchState: "already_running",
           stage: "inspect-materials",
           errorCode: "",
@@ -606,7 +660,7 @@ basekit.addAction({
 
       let decision: MaterialDecision;
       try {
-        decision = decideMaterials(fields);
+        decision = decideMaterials(fields, target.recordId);
       } catch (error) {
         const failure = error instanceof DispatchFailure
           ? error

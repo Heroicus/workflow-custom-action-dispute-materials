@@ -28,6 +28,8 @@ OOXML_SUFFIXES = {".docx", ".xlsx", ".pptx"}
 IGNORED_NAMES = {".ds_store", "thumbs.db"}
 MAX_ARCHIVE_FILES = 500
 MAX_ARCHIVE_BYTES = 500 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_BYTES = 100 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 200
 MIN_TEXT_CHARS_PER_PDF_PAGE = 24
 PDF_OCR_DPI = 300
 VISION_TASK_SCHEMA = "vision-task/v1"
@@ -167,6 +169,7 @@ class AudioCollector:
 
 @dataclass
 class ExtractionResult:
+    attachment_id: str
     file_name: str
     sha256: str
     size: int
@@ -229,9 +232,9 @@ def extract_ooxml(
     parts: list[str] = []
     methods = [suffix.lstrip(".") + "_xml"]
     with zipfile.ZipFile(path) as archive:
-        for name in sorted(archive.namelist()):
+        for member, name in sorted(safe_archive_members(archive), key=lambda item: item[1]):
             if name.endswith(".xml") and any(name.startswith(prefix) for prefix in prefixes):
-                text = xml_text(archive.read(name))
+                text = xml_text(archive.read(member))
                 if text.strip():
                     parts.append(f"[{name}]\n{text}")
                 continue
@@ -241,17 +244,15 @@ def extract_ooxml(
             try:
                 with tempfile.NamedTemporaryFile(suffix=Path(name).suffix, delete=False) as handle:
                     temporary_name = handle.name
-                    handle.write(archive.read(name))
+                    handle.write(archive.read(member))
                 try:
                     ocr = run_tesseract(Path(temporary_name))
                 except MaterialError:
                     ocr = OCRResult(text="", mean_confidence=None)
                     if "embedded_ocr_unavailable" not in methods:
                         methods.append("embedded_ocr_unavailable")
-                if ocr.text:
-                    parts.append(f"[{name}:OCR]\n{ocr.text}")
-                    if "embedded_ocr" not in methods:
-                        methods.append("embedded_ocr")
+                if ocr.text and "embedded_ocr_hint" not in methods:
+                    methods.append("embedded_ocr_hint")
                 if collector:
                     collector.add(
                         Path(temporary_name),
@@ -336,7 +337,9 @@ def extract_image(
             reason="image_attachment",
             ocr=ocr,
         )
-    return ocr.text, methods
+    # OCR only helps the visual worker locate text.  It is not evidentiary
+    # source text and is therefore excluded from the corpus.
+    return "", methods
 
 
 def extract_audio(
@@ -354,15 +357,9 @@ def extract_audio(
     return "", ["feishu_minutes_transcription_required"]
 
 
-def has_large_page_image(page: object) -> bool:
+def has_page_image(page: object) -> bool:
     try:
-        rect = page.rect  # type: ignore[attr-defined]
-        page_area = max(1.0, float(rect.width * rect.height))
-        return any(
-            float(image_rect.width * image_rect.height) / page_area >= 0.25
-            for image in page.get_images(full=True)  # type: ignore[attr-defined]
-            for image_rect in page.get_image_rects(image[0])  # type: ignore[attr-defined]
-        )
+        return bool(page.get_images(full=True))  # type: ignore[attr-defined]
     except Exception:
         return False
 
@@ -387,8 +384,8 @@ def extract_pdf(
             page = document[page_index]
             text = page.get_text("text").strip()
             has_native_text = normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE
-            large_image = has_large_page_image(page)
-            if has_native_text and not large_image:
+            page_image = has_page_image(page)
+            if has_native_text and not page_image:
                 methods.add("pdf_text")
             else:
                 temporary_name = ""
@@ -406,7 +403,7 @@ def extract_pdf(
                     if has_native_text:
                         methods.add("pdf_text")
                     elif ocr.text:
-                        text = ocr.text
+                        methods.add("ocr_hint_only")
                     if collector:
                         collector.add(
                             Path(temporary_name),
@@ -414,7 +411,7 @@ def extract_pdf(
                             source_sha256=source_sha256 or sha256_file(path),
                             unit=f"page:{page_index + 1}",
                             page=page_index + 1,
-                            reason="pdf_page_visual_content" if large_image else "pdf_page_without_text_layer",
+                            reason="pdf_page_visual_content" if page_image else "pdf_page_without_text_layer",
                             ocr=ocr,
                         )
                     methods.add("vision_required")
@@ -477,7 +474,7 @@ def extract_pdf_cli(
                         ocr = OCRResult(text="", mean_confidence=None)
                         methods.add("ocr_unavailable")
                     if ocr.text:
-                        text = ocr.text
+                        methods.add("ocr_hint_only")
                     if collector:
                         collector.add(
                             image,
@@ -579,6 +576,11 @@ def safe_archive_members(archive: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo
             continue
         if Path(decoded_name).is_absolute() or ".." in parts:
             raise MaterialError("unsafe archive path")
+        if member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            raise MaterialError(f"archive member too large: {decoded_name}")
+        compressed = max(1, member.compress_size)
+        if member.file_size > 1024 * 1024 and member.file_size / compressed > MAX_COMPRESSION_RATIO:
+            raise MaterialError(f"archive compression ratio too high: {decoded_name}")
         total_size += member.file_size
         selected.append((member, decoded_name))
         if len(selected) > MAX_ARCHIVE_FILES or total_size > MAX_ARCHIVE_BYTES:
@@ -609,7 +611,7 @@ def extract_archive(
                     shutil.copyfileobj(source, destination)
                 child_name = f"{display_name or path.name}::{decoded_name}"
                 result = extract_material(
-                    target, depth + 1, display_name=child_name,
+                    target, depth=depth + 1, display_name=child_name,
                     collector=collector, audio_collector=audio_collector,
                 )
                 children.append({key: value for key, value in asdict(result).items() if key != "text"})
@@ -622,6 +624,7 @@ def extract_archive(
 
 def extract_material(
     path: Path,
+    attachment_id: str = "",
     depth: int = 0,
     display_name: str | None = None,
     collector: VisionCollector | None = None,
@@ -664,6 +667,7 @@ def extract_material(
 
     status = "ignored" if ignored else ("complete" if not failures else ("partial" if text.strip() else "failed"))
     return ExtractionResult(
+        attachment_id=attachment_id,
         file_name=name,
         sha256=source_sha256,
         size=path.stat().st_size,
@@ -683,7 +687,10 @@ def iter_material_files(directory: Path) -> Iterable[Path]:
             yield path
 
 
-def write_outputs(results: list[ExtractionResult], output_dir: Path, manifest_path: Path, corpus_path: Path) -> dict[str, object]:
+def write_outputs(
+    results: list[ExtractionResult], output_dir: Path, manifest_path: Path, corpus_path: Path,
+    vision_tasks: dict[str, object], audio_tasks: dict[str, object],
+) -> dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     corpus_parts: list[str] = []
     for index, result in enumerate(results, 1):
@@ -691,10 +698,24 @@ def write_outputs(results: list[ExtractionResult], output_dir: Path, manifest_pa
         text_path.write_text(result.text, encoding="utf-8")
         corpus_parts.append(f"=== {result.file_name} ===\n{result.text}")
 
+    corpus = "\n\n".join(corpus_parts)
     items = [{key: value for key, value in asdict(result).items() if key != "text"} for result in results]
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "items": items,
+        "artifacts": {
+            "source_corpus_sha256": hashlib.sha256(corpus.encode("utf-8")).hexdigest(),
+            "text_outputs": [
+                {"path": f"{index:03d}.txt", "sha256": sha256_file(output_dir / f"{index:03d}.txt")}
+                for index in range(1, len(results) + 1)
+            ],
+            "vision_task_ids": sorted(
+                str(item.get("task_id")) for item in vision_tasks.get("tasks", []) if isinstance(item, dict)
+            ),
+            "audio_task_ids": sorted(
+                str(item.get("task_id")) for item in audio_tasks.get("tasks", []) if isinstance(item, dict)
+            ),
+        },
         "summary": {
             "total": len(results),
             "complete": sum(item.status == "complete" for item in results),
@@ -705,8 +726,65 @@ def write_outputs(results: list[ExtractionResult], output_dir: Path, manifest_pa
         },
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    corpus_path.write_text("\n\n".join(corpus_parts), encoding="utf-8")
+    corpus_path.write_text(corpus, encoding="utf-8")
     return manifest
+
+
+def read_object(path: Path, label: str) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MaterialError(f"invalid {label}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise MaterialError(f"invalid {label}: root must be object")
+    return value
+
+
+def verified_downloads(runtime_path: Path, receipt_path: Path, input_dir: Path) -> dict[Path, str]:
+    """Bind every local input file to the exact Base attachment token."""
+
+    runtime = read_object(runtime_path, "runtime")
+    record_id = str(runtime.get("record_id") or "").strip()
+    expected = runtime.get("attachment_ids")
+    if not re.fullmatch(r"rec[A-Za-z0-9_-]{1,125}", record_id) or not isinstance(expected, list):
+        raise MaterialError("runtime record_id or attachment_ids is invalid")
+    expected_ids = sorted({str(item).strip() for item in expected if str(item).strip()})
+    if len(expected_ids) != len(expected) or not expected_ids:
+        raise MaterialError("runtime attachment_ids must be unique and non-empty")
+
+    receipt = read_object(receipt_path, "attachment download receipt")
+    data = receipt.get("data")
+    downloaded = data.get("downloaded") if isinstance(data, dict) else None
+    if receipt.get("ok") is not True or receipt.get("identity") != "user" or not isinstance(downloaded, list):
+        raise MaterialError("attachment download receipt is not a successful user readback")
+    root = input_dir.resolve(strict=True)
+    mapping: dict[Path, str] = {}
+    received_ids: list[str] = []
+    for item in downloaded:
+        if not isinstance(item, dict):
+            raise MaterialError("attachment download item is not an object")
+        token = str(item.get("file_token") or "").strip()
+        saved = Path(str(item.get("saved_path") or "")).resolve(strict=True)
+        try:
+            saved.relative_to(root)
+        except ValueError as exc:
+            raise MaterialError("downloaded attachment escaped the job input directory") from exc
+        if str(item.get("record_id") or "") != record_id or str(item.get("field_id") or "") != "fldOz2CYX4":
+            raise MaterialError("downloaded attachment is not bound to the target record field")
+        try:
+            receipt_size = int(item.get("size_bytes") or -1)
+        except (TypeError, ValueError) as exc:
+            raise MaterialError("downloaded attachment size is invalid") from exc
+        if not saved.is_file() or receipt_size != saved.stat().st_size:
+            raise MaterialError("downloaded attachment size/readback mismatch")
+        if saved in mapping:
+            raise MaterialError("duplicate downloaded attachment path")
+        mapping[saved] = token
+        received_ids.append(token)
+    actual_files = {path.resolve() for path in iter_material_files(root)}
+    if sorted(received_ids) != expected_ids or set(mapping) != actual_files:
+        raise MaterialError("downloaded attachment tokens or files do not match the runtime envelope")
+    return mapping
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -721,6 +799,8 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--vision-tasks", type=Path, required=True)
     extract.add_argument("--audio-dir", type=Path, required=True)
     extract.add_argument("--audio-tasks", type=Path, required=True)
+    extract.add_argument("--runtime", type=Path, required=True)
+    extract.add_argument("--download-receipt", type=Path, required=True)
     return parser
 
 
@@ -732,15 +812,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise MaterialError("input directory is not a directory")
         collector = VisionCollector(args.vision_dir)
         audio_collector = AudioCollector(args.audio_dir)
+        downloads = verified_downloads(args.runtime, args.download_receipt, source)
         results = [
-            extract_material(path, collector=collector, audio_collector=audio_collector)
+            extract_material(
+                path, attachment_id=downloads[path.resolve()],
+                collector=collector, audio_collector=audio_collector,
+            )
             for path in iter_material_files(source)
         ]
         if not results:
             raise MaterialError("no attachment files found")
-        manifest = write_outputs(results, args.output_dir, args.manifest, args.corpus)
         vision = collector.write(args.vision_tasks)
         audio = audio_collector.write(args.audio_tasks)
+        manifest = write_outputs(results, args.output_dir, args.manifest, args.corpus, vision, audio)
         output = dict(manifest["summary"])
         output["vision_tasks"] = vision["summary"]["total"]
         output["audio_tasks"] = audio["summary"]["total"]

@@ -1,4 +1,4 @@
 interface:
   display_name: "纠纷材料整理"
   short_description: "使用内置固定模板整理当前案件附件并回写同一记录"
-  default_prompt: "使用 $organize-dispute-materials 6.6.0 处理 dispute-material-run/v6.6 JSON。原样保存并校验运行信封，一次提取全部附件；先区分当前程序、前置程序、证据和工作底稿，再由 Deepseek-V4-Pro 唯一填写事实脚手架。视觉任务交给 Doubao-Seed-2.1-turbo 只读子智能体，视觉层只提供逐字稿和不确定区域，不规范化业务字段；音频通过用户身份的飞书妙记生成并远端读回逐字稿。语义完整性、金额、隐私、过程泄露、视觉/音频证据、报告、权限和 Base 读回全部校验通过后才返回完成。"
+  default_prompt: "使用 $organize-dispute-materials 6.7.0 处理 dispute-material-run/v6.7 JSON。原样保存并校验运行信封，一次提取全部附件；先区分当前程序、前置程序、证据和工作底稿，再由 Deepseek-V4-Pro 唯一填写事实脚手架。视觉任务交给 Doubao-Seed-2.1-turbo 只读子智能体，视觉层只提供逐字稿和不确定区域，不规范化业务字段；音频通过用户身份的飞书妙记生成并远端读回逐字稿。语义完整性、金额、隐私、过程泄露、视觉/音频证据、报告、权限、Base 阶段回写和最终状态读回全部校验通过后才返回完成。"

@@ -1,6 +1,6 @@
-export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.6";
+export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.7";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.6.0";
+export const REQUIRED_SKILL_VERSION = "6.7.0";
 
 const REPORT_DOCX_ORIGIN = "https://aixuexi.feishu.cn";
 const REPORT_DOCX_PATTERN = /https:\/\/aixuexi\.feishu\.cn\/docx\/([A-Za-z0-9_-]{8,128})(?=$|[\s)\]}>,'"?&#])/g;
@@ -59,13 +59,14 @@ export function parseReportDocxReference(value: unknown): ReportDocxReference | 
 export function resolveReportDocxReference(
   value: unknown,
   baselineDocumentToken: string,
+  allowTitleOnlyFallback = false,
 ): ReportDocxReference | undefined {
   if (!hasMeaningfulFieldValue(value)) return undefined;
   const baselineReference = reportDocxReferenceFromToken(baselineDocumentToken);
   if (!baselineReference) return undefined;
   const parsedReference = parseReportDocxReference(value);
   if (parsedReference && parsedReference.documentToken !== baselineDocumentToken) return undefined;
-  return parsedReference || baselineReference;
+  return parsedReference || (allowTitleOnlyFallback ? baselineReference : undefined);
 }
 
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";

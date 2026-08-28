@@ -1,5 +1,5 @@
 {
-  "schema_version": "6.6.0",
+  "schema_version": "6.7.0",
   "template": "report-template.xml",
   "required_scalars": [
     "case_number"
@@ -91,5 +91,6 @@
     "completeness_rows": ["index", "source_check_item", "available", "source_note"],
     "conflict_rows": ["index", "matter", "source_a", "source_b", "existing_resolution"],
     "quality_rows": ["index", "check", "result"]
-  }
+  },
+  "table_width": 690
 }
