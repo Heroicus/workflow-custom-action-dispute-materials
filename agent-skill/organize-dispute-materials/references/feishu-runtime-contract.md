@@ -31,7 +31,7 @@ record_id = 运行信封中的 record_id
 
 ```text
 Deepseek-V4-Pro         主智能体、唯一事实合并者、唯一业务写入者
-Doubao-Seed-2.1-turbo   纠纷材料视觉核验员，只读图片并返回 vision-evidence/v1
+Doubao-Seed-2.1-turbo   纠纷材料视觉核验员，只读图片并返回 vision-evidence/v2 逐字证据
 Feishu Minutes          用户身份远端音频转写，只返回逐字稿和妙记读回证据
 ```
 

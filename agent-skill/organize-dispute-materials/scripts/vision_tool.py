@@ -14,21 +14,19 @@ from typing import Any, Sequence
 
 
 TASK_SCHEMA = "vision-task/v1"
-RESULT_SCHEMA = "vision-evidence/v1"
-PACK_SCHEMA = "vision-evidence-pack/v1"
+RESULT_SCHEMA = "vision-evidence/v2"
+PACK_SCHEMA = "vision-evidence-pack/v2"
 EXPECTED_AGENT = "纠纷材料视觉核验员"
 EXPECTED_MODEL = "Doubao-Seed-2.1-turbo"
 ALLOWED_STATUS = {"complete", "partial", "failed"}
-ALLOWED_FIELD_STATUS = {"clear", "unclear"}
 RESULT_KEYS = {
     "schema_version", "task_id", "source_sha256", "image_sha256", "producer",
-    "status", "verbatim_text", "critical_fields", "tables", "uncertain_regions",
+    "status", "verbatim_text", "uncertain_regions",
 }
 TASK_KEYS = {
     "schema_version", "task_id", "source_file", "source_sha256", "unit", "page",
     "reason", "image_path", "image_sha256", "ocr_text", "ocr_mean_confidence",
 }
-FIELD_KEYS = {"field_type", "visible_text", "normalized_value", "status", "source_ref"}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TASK_ID = re.compile(r"^vis_[0-9a-f]{20}$")
 
@@ -98,29 +96,6 @@ def require_keys(
         )
 
 
-def normalized(value: str) -> str:
-    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", value or "").lower()
-
-
-def numeric_tokens(value: str) -> list[str]:
-    compact = re.sub(r"[,，\s]", "", value)
-    tokens: list[str] = []
-    for token in re.findall(r"\d+(?:\.\d+)?", compact):
-        integer, dot, fraction = token.partition(".")
-        integer = integer.lstrip("0") or "0"
-        fraction = fraction.rstrip("0")
-        tokens.append(integer + (dot + fraction if fraction else ""))
-    return tokens
-
-
-def normalized_value_supported(normalized_value: str, visible_text: str) -> bool:
-    if normalized(normalized_value) in normalized(visible_text):
-        return True
-    expected_numbers = numeric_tokens(normalized_value)
-    visible_numbers = numeric_tokens(visible_text)
-    return bool(expected_numbers) and all(token in visible_numbers for token in expected_numbers)
-
-
 def load_tasks(path: Path) -> list[dict[str, Any]]:
     root = read_object(path)
     require_keys(
@@ -170,42 +145,6 @@ def load_tasks(path: Path) -> list[dict[str, Any]]:
     return tasks
 
 
-def validate_field(value: Any, task_id: str, index: int, vision_text: str, ocr_text: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise VisionError("VISION_RESULT_INVALID", f"{task_id}.critical_fields[{index}] 必须是对象")
-    require_keys(value, FIELD_KEYS, FIELD_KEYS, f"{task_id}.critical_fields[{index}]")
-    field_type = required_text(value.get("field_type"), f"{task_id}.critical_fields[{index}].field_type")
-    visible_text = required_text(value.get("visible_text"), f"{task_id}.critical_fields[{index}].visible_text")
-    status = required_text(value.get("status"), f"{task_id}.critical_fields[{index}].status")
-    if status not in ALLOWED_FIELD_STATUS:
-        raise VisionError("VISION_RESULT_INVALID", "关键字段 status 非法", {"task_id": task_id, "status": status})
-    raw_normalized_value = value.get("normalized_value")
-    if not isinstance(raw_normalized_value, str):
-        raise VisionError("VISION_RESULT_INVALID", f"{task_id}.critical_fields[{index}].normalized_value 必须是字符串")
-    normalized_value = raw_normalized_value.strip()
-    if status == "clear" and not normalized_value:
-        raise VisionError("VISION_RESULT_INVALID", "清晰关键字段缺少规范值", {"task_id": task_id, "field_type": field_type})
-    if normalized(visible_text) not in normalized(vision_text):
-        raise VisionError(
-            "VISION_FIELD_UNSUPPORTED", "视觉关键字段没有逐字转录支持",
-            {"task_id": task_id, "field_type": field_type, "visible_text": visible_text},
-        )
-    if status == "clear" and not normalized_value_supported(normalized_value, visible_text):
-        raise VisionError(
-            "VISION_FIELD_UNSUPPORTED", "视觉关键字段规范值不能由可见原文支持",
-            {"task_id": task_id, "field_type": field_type, "normalized_value": normalized_value},
-        )
-    source_ref = required_text(value.get("source_ref"), f"{task_id}.critical_fields[{index}].source_ref")
-    return {
-        "field_type": field_type,
-        "visible_text": visible_text,
-        "normalized_value": normalized_value,
-        "status": status,
-        "source_ref": source_ref,
-        "ocr_agreement": "agree" if normalized_value and normalized_value_supported(normalized_value, ocr_text) else "vision_override",
-    }
-
-
 def validate_result(task: dict[str, Any], path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     result = read_object(path)
     task_id = str(task["task_id"])
@@ -229,11 +168,6 @@ def validate_result(task: dict[str, Any], path: Path) -> tuple[dict[str, Any], l
     vision_text = str(result.get("verbatim_text") or "").strip()
     if status != "failed" and not vision_text:
         raise VisionError("VISION_RESULT_INVALID", "视觉结果缺少逐字转录", {"task_id": task_id})
-    raw_fields = result.get("critical_fields")
-    if not isinstance(raw_fields, list):
-        raise VisionError("VISION_RESULT_INVALID", "critical_fields 必须是数组", {"task_id": task_id})
-    ocr_text = str(task.get("ocr_text") or "")
-    fields = [validate_field(value, task_id, index, vision_text, ocr_text) for index, value in enumerate(raw_fields)]
     raw_uncertain = result.get("uncertain_regions")
     if not isinstance(raw_uncertain, list) or not all(isinstance(item, dict) for item in raw_uncertain):
         raise VisionError("VISION_RESULT_INVALID", "uncertain_regions 必须是对象数组", {"task_id": task_id})
@@ -247,16 +181,13 @@ def validate_result(task: dict[str, Any], path: Path) -> tuple[dict[str, Any], l
         if "source_ref" in item:
             region["source_ref"] = required_text(item.get("source_ref"), f"{task_id}.uncertain_regions[{index}].source_ref")
         uncertain_regions.append(region)
-    raw_tables = result.get("tables")
-    if not isinstance(raw_tables, list):
-        raise VisionError("VISION_RESULT_INVALID", "tables 必须是数组", {"task_id": task_id})
-    unresolved = [field for field in fields if field["status"] == "unclear"]
+    unresolved: list[dict[str, Any]] = []
+    if status != "complete":
+        unresolved.append({"field_type": "task", "visible_text": f"视觉任务状态为 {status}", "status": "unclear"})
     unresolved.extend(
         {"field_type": "uncertain_region", "visible_text": str(item.get("description") or ""), "status": "unclear"}
         for item in uncertain_regions if item["critical"] is True
     )
-    if status == "failed":
-        unresolved.append({"field_type": "task", "visible_text": "视觉任务失败", "status": "unclear"})
     normalized_result = {
         "task_id": task_id,
         "source_file": str(task.get("source_file") or ""),
@@ -267,8 +198,6 @@ def validate_result(task: dict[str, Any], path: Path) -> tuple[dict[str, Any], l
         "status": status,
         "producer": producer,
         "verbatim_text": vision_text,
-        "critical_fields": fields,
-        "tables": raw_tables,
         "uncertain_regions": uncertain_regions,
         "ocr_mean_confidence": task.get("ocr_mean_confidence"),
     }
@@ -322,9 +251,6 @@ def reconcile(tasks_path: Path, results_dir: Path, corpus_path: Path, output_cor
             "complete": sum(item["status"] == "complete" for item in results),
             "partial": sum(item["status"] == "partial" for item in results),
             "failed": sum(item["status"] == "failed" for item in results),
-            "ocr_disagreements": sum(
-                field["ocr_agreement"] == "vision_override" for item in results for field in item["critical_fields"]
-            ),
             "unresolved": len(unresolved),
         },
     }

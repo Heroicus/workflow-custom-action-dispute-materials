@@ -1,6 +1,6 @@
-export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.5";
+export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.6";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.5.3";
+export const REQUIRED_SKILL_VERSION = "6.6.0";
 
 const REPORT_DOCX_ORIGIN = "https://aixuexi.feishu.cn";
 const REPORT_DOCX_PATTERN = /https:\/\/aixuexi\.feishu\.cn\/docx\/([A-Za-z0-9_-]{8,128})(?=$|[\s)\]}>,'"?&#])/g;
@@ -75,7 +75,7 @@ export const MODEL_CONTRACT = {
   main_model: "Deepseek-V4-Pro",
   vision_agent_name: "纠纷材料视觉核验员",
   vision_model: "Doubao-Seed-2.1-turbo",
-  vision_result_schema: "vision-evidence/v1",
+  vision_result_schema: "vision-evidence/v2",
   audio_transcription_service: "Feishu Minutes",
   audio_result_schema: "audio-evidence/v1",
   write_policy: "main_agent_only",

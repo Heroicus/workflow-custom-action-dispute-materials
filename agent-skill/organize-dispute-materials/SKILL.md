@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.5.3"
+  version: "6.6.0"
   tier: STANDARD
   category: legal-automation
 ---
@@ -12,11 +12,11 @@ metadata:
 
 ## 输入
 
-只接受 `dispute-material-run/v6.5` JSON：
+只接受 `dispute-material-run/v6.6` JSON：
 
 ```text
 operation = process_target_record
-required_skill_version = 6.5.3
+required_skill_version = 6.6.0
 app_token、table_id、record_id、dispatch_id、case_number 非空
 mode = initial | supplement
 model_contract = Deepseek-V4-Pro 主写入 + Doubao-Seed-2.1-turbo 只读视觉 + Feishu Minutes 音频逐字稿
@@ -60,7 +60,7 @@ python3 "$SKILL_ROOT/scripts/material_tool.py" extract \
 1. 调用已配置的 `纠纷材料视觉核验员` 子智能体；
 2. 必须同时传入任务 JSON 和 `image_path` 指向的原始图片，不能只传 OCR 文本；
 3. 子智能体必须固定使用 Doubao-Seed-2.1-turbo；
-4. 子智能体只逐字转录图片并返回 `vision-evidence/v1` JSON，不得填写事实、生成报告或读写飞书；
+4. 子智能体只逐字转录图片并返回 `vision-evidence/v2` JSON，不得规范化日期、金额或其他业务字段，不得填写事实、生成报告或读写飞书；
 5. 只允许去掉 Markdown 代码围栏后，把子智能体原始 JSON 保存为 `extracted/vision-results/<task_id>.json`；不得改名字段、补字段、转换 schema、删除推断项或手工重写结果。返回不合约时重试一次，仍不合约则失败。
 
 输出契约见 `references/vision-contract.md` 和 `references/vision-result-schema.json`。全部任务完成后执行：
@@ -74,7 +74,7 @@ python3 "$SKILL_ROOT/scripts/vision_tool.py" reconcile \
   --evidence extracted/vision-evidence.json
 ```
 
-没有视觉任务时也必须运行该命令，它会生成零任务证据包并复制语料。缺少子智能体结果、哈希不一致、模型不符或仍有看不清的关键字段时立即失败；主智能体不得猜测或绕过。
+没有视觉任务时也必须运行该命令，它会生成零任务证据包并复制语料。视觉层只验证任务身份、来源哈希、模型身份、逐字稿存在性和关键不确定区域，不做日期、金额或姓名的启发式规范化。缺少结果、哈希不一致、模型不符或仍有看不清的关键内容时立即失败；主智能体不得猜测或绕过。
 
 ### 3. 生成并读回音频逐字稿
 
@@ -270,7 +270,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" build-failure \
 {
   "status": "completed",
   "record_id": "rec...",
-  "dispatch_id": "odm-v64:rec...:...",
+  "dispatch_id": "odm-v66:rec...:...",
   "processing_status": "已完成",
   "report_url": "https://.../docx/...",
   "error_code": ""

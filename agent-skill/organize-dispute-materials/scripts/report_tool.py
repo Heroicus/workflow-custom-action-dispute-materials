@@ -38,11 +38,11 @@ EXACT_SOURCE_SCALARS = {
     "opponent_name", "opponent_role", "judge", "clerk", "judgment_number",
 }
 NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
-VISION_PACK_SCHEMA = "vision-evidence-pack/v1"
+VISION_PACK_SCHEMA = "vision-evidence-pack/v2"
 AUDIO_PACK_SCHEMA = "audio-evidence-pack/v1"
-EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.5"
-EXPECTED_SKILL_VERSION = "6.5.3"
-EXPECTED_COMPONENT_BUILD = "6.5.5-skill-6.5.3"
+EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.6"
+EXPECTED_SKILL_VERSION = "6.6.0"
+EXPECTED_COMPONENT_BUILD = "6.6.0-skill-6.6.0"
 NON_EVIDENCE_NAME_PATTERN = re.compile(
     r"送达地址确认书|证据材料清单|证据目录|起诉状|仲裁申请书|答辩书|质证意见|裁决书|判决书|庭审笔录"
 )
@@ -639,7 +639,7 @@ def validate_vision_evidence(
             not re.fullmatch(r"vis_[0-9a-f]{20}", task_id)
             or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
             or not re.fullmatch(r"[0-9a-f]{64}", image_hash)
-            or item.get("status") not in {"complete", "partial"}
+            or item.get("status") != "complete"
             or not isinstance(producer, dict)
             or producer.get("agent_name") != "纠纷材料视觉核验员"
             or producer.get("model") != "Doubao-Seed-2.1-turbo"
@@ -647,11 +647,11 @@ def validate_vision_evidence(
             raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据任务身份、哈希或状态不正确", {"task_id": task_id})
         if task_id in task_map:
             raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据任务 ID 重复", {"task_id": task_id})
-        fields = item.get("critical_fields")
+        verbatim_text = item.get("verbatim_text")
         regions = item.get("uncertain_regions")
         if (
-            not isinstance(fields, list)
-            or any(not isinstance(field, dict) or field.get("status") != "clear" for field in fields)
+            not isinstance(verbatim_text, str)
+            or not verbatim_text.strip()
             or not isinstance(regions, list)
             or any(not isinstance(region, dict) or region.get("critical") is True for region in regions)
         ):
@@ -1094,7 +1094,7 @@ def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
         "main_model": "Deepseek-V4-Pro",
         "vision_agent_name": "纠纷材料视觉核验员",
         "vision_model": "Doubao-Seed-2.1-turbo",
-        "vision_result_schema": "vision-evidence/v1",
+        "vision_result_schema": "vision-evidence/v2",
         "audio_transcription_service": "Feishu Minutes",
         "audio_result_schema": "audio-evidence/v1",
         "write_policy": "main_agent_only",

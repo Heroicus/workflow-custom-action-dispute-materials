@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "vision-evidence/v1",
+  "$id": "vision-evidence/v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,12 +11,10 @@
     "producer",
     "status",
     "verbatim_text",
-    "critical_fields",
-    "tables",
     "uncertain_regions"
   ],
   "properties": {
-    "schema_version": { "const": "vision-evidence/v1" },
+    "schema_version": { "const": "vision-evidence/v2" },
     "task_id": { "type": "string", "pattern": "^vis_[0-9a-f]{20}$" },
     "source_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "image_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -31,28 +29,6 @@
     },
     "status": { "enum": ["complete", "partial", "failed"] },
     "verbatim_text": { "type": "string" },
-    "critical_fields": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["field_type", "visible_text", "normalized_value", "status", "source_ref"],
-        "properties": {
-          "field_type": { "type": "string", "minLength": 1 },
-          "visible_text": { "type": "string", "minLength": 1 },
-          "normalized_value": { "type": "string" },
-          "status": { "enum": ["clear", "unclear"] },
-          "source_ref": { "type": "string", "minLength": 1 }
-        },
-        "allOf": [
-          {
-            "if": { "properties": { "status": { "const": "clear" } } },
-            "then": { "properties": { "normalized_value": { "minLength": 1 } } }
-          }
-        ]
-      }
-    },
-    "tables": { "type": "array" },
     "uncertain_regions": {
       "type": "array",
       "items": {
@@ -60,7 +36,7 @@
         "additionalProperties": false,
         "required": ["description", "critical"],
         "properties": {
-          "description": { "type": "string" },
+          "description": { "type": "string", "minLength": 1 },
           "critical": { "type": "boolean" },
           "source_ref": { "type": "string" }
         }

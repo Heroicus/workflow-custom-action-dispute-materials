@@ -18,17 +18,16 @@
 
 ## 输出
 
-必须只返回符合 `vision-result-schema.json` 的一个 JSON 对象：
+必须只返回符合 `vision-result-schema.json` 的一个 `vision-evidence/v2` JSON 对象：
 
 - `verbatim_text` 只逐字转录可见内容，不总结、不推断、不补全；
-- 姓名、机构、案号、日期、金额、利率、账号、裁判结果等进入 `critical_fields`；
-- `normalized_value` 只能做原文直接支持的格式归一化；看不清的关键字段使用 `status=unclear` 并留空规范值，不得猜测；
-- 表格按可见行列写入 `tables`，无法确定的单元格保留空值并记入 `uncertain_regions`；
+- 看不清的区域写入 `uncertain_regions`；涉及姓名、机构、案号、日期、金额、利率、账号或裁判结果时必须标记 `critical=true`；
+- `status=complete` 表示没有关键内容无法辨认；存在任何关键不确定区域时使用 `partial`，整张图片不可读时使用 `failed`；
 - `source_sha256`、`image_sha256`、`task_id` 必须原样返回；
 - `producer.agent_name` 固定为 `纠纷材料视觉核验员`；
 - `producer.model` 固定为 `Doubao-Seed-2.1-turbo`。
 
-禁止使用 `field_name`、顶层 `visible_text` 或 `status=inferred_from_context` 等自定义字段和值；顶层正文键必须是 `verbatim_text`，关键字段键必须是 `field_type / visible_text / normalized_value / status / source_ref`。任何上下文推断都不是视觉证据。
+视觉层不负责日期、金额、姓名或其他业务值的规范化，也不返回 `critical_fields` 或 `normalized_value`。这些字段既不参与最终语料，也不应由校验器用启发式规则反推。任何上下文推断都不是视觉证据。
 
 ## 成功门
 
