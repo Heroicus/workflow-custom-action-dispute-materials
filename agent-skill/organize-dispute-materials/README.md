@@ -1,3 +1,3 @@
-# organize-dispute-materials 6.5.0
+# organize-dispute-materials 6.5.1
 
 一次提取当前记录全部附件，将压缩包逐文件展开；图片与扫描页经过 Tesseract 和只读 Doubao-Seed-2.1-turbo 视觉核验，音频通过飞书妙记生成并远端读回逐字稿，再由 Deepseek-V4-Pro 单独合并事实并生成固定 XML 报告。姓名、机构、案号、数字、视觉与音频来源、核心章节、材料覆盖和 Base 回写均有可执行校验；无依据内容保持空值。

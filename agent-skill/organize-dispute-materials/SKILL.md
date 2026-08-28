@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.5.0"
+  version: "6.5.1"
   tier: STANDARD
   category: legal-automation
 ---
@@ -16,7 +16,7 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.5.0
+required_skill_version = 6.5.1
 app_token、table_id、record_id、dispatch_id、case_number 非空
 mode = initial | supplement
 model_contract = Deepseek-V4-Pro 主写入 + Doubao-Seed-2.1-turbo 只读视觉 + Feishu Minutes 音频逐字稿

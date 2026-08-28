@@ -41,8 +41,8 @@ NON_EVIDENTIARY_ROWS = {"evidence_rows", "completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v1"
 AUDIO_PACK_SCHEMA = "audio-evidence-pack/v1"
 EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.5"
-EXPECTED_SKILL_VERSION = "6.5.0"
-EXPECTED_COMPONENT_BUILD = "6.5.0-semantic-report"
+EXPECTED_SKILL_VERSION = "6.5.1"
+EXPECTED_COMPONENT_BUILD = "6.5.1-table-layout"
 NON_EVIDENCE_NAME_PATTERN = re.compile(
     r"送达地址确认书|证据材料清单|证据目录|起诉状|仲裁申请书|答辩书|质证意见|裁决书|判决书|庭审笔录"
 )
