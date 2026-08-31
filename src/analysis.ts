@@ -1,9 +1,10 @@
 export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.7";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.7.0";
+export const REQUIRED_SKILL_VERSION = "6.7.2";
 
 const REPORT_DOCX_ORIGIN = "https://aixuexi.feishu.cn";
 const REPORT_DOCX_PATTERN = /https:\/\/aixuexi\.feishu\.cn\/docx\/([A-Za-z0-9_-]{8,128})(?=$|[\s)\]}>,'"?&#])/g;
+const EXPLICIT_URL_PATTERN = /https?:\/\/[^\s)\]}>,'"]+/g;
 
 export type ReportDocxReference = {
   url: string;
@@ -64,9 +65,17 @@ export function resolveReportDocxReference(
   if (!hasMeaningfulFieldValue(value)) return undefined;
   const baselineReference = reportDocxReferenceFromToken(baselineDocumentToken);
   if (!baselineReference) return undefined;
+  const strings: string[] = [];
+  collectStrings(value, strings, new Set());
+  const explicitUrls = strings.flatMap((text) => {
+    EXPLICIT_URL_PATTERN.lastIndex = 0;
+    return [...text.matchAll(EXPLICIT_URL_PATTERN)].map((match) => match[0]);
+  });
+  if (explicitUrls.length && explicitUrls.some((url) => url !== baselineReference.url)) return undefined;
   const parsedReference = parseReportDocxReference(value);
   if (parsedReference && parsedReference.documentToken !== baselineDocumentToken) return undefined;
-  return parsedReference || (allowTitleOnlyFallback ? baselineReference : undefined);
+  if (explicitUrls.length) return parsedReference;
+  return allowTitleOnlyFallback ? baselineReference : undefined;
 }
 
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";

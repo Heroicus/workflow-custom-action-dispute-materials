@@ -226,7 +226,7 @@ def reconcile(tasks_path: Path, results_dir: Path, corpus_path: Path, output_cor
         results.append(result)
         unresolved.extend({"task_id": task_id, **item} for item in result_unresolved)
     additions = [
-        f"=== 视觉核验：{item['source_file']} {item['unit']} ===\n{item['verbatim_text']}"
+        f"=== 视觉核验[sha256={item['source_sha256']}]：{item['source_file']} {item['unit']} ===\n{item['verbatim_text']}"
         for item in results if item["verbatim_text"]
     ]
     verified = source_corpus.rstrip() + "\n\n" + "\n\n".join(additions) + "\n" if additions else source_corpus

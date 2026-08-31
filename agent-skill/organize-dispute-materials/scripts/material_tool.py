@@ -696,7 +696,7 @@ def write_outputs(
     for index, result in enumerate(results, 1):
         text_path = output_dir / f"{index:03d}.txt"
         text_path.write_text(result.text, encoding="utf-8")
-        corpus_parts.append(f"=== {result.file_name} ===\n{result.text}")
+        corpus_parts.append(f"=== 材料[sha256={result.sha256}] {result.file_name} ===\n{result.text}")
 
     corpus = "\n\n".join(corpus_parts)
     items = [{key: value for key, value in asdict(result).items() if key != "text"} for result in results]

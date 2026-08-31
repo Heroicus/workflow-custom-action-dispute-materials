@@ -1,6 +1,6 @@
 # 纠纷材料整理工作流组件
 
-当前待发布版本：小组件 `6.7.0` / Skill `6.7.0`
+当前待发布版本：小组件 `6.7.2` / Skill `6.7.2`
 本版本将视觉层收口为只读逐字证据：豆包只返回原文和不确定区域，DeepSeek 在统一语料上唯一提取业务事实，OCR 只是视觉子智能体的定位提示，不直接进入事实语料。
 文档架构：全附件回执绑定 + 豆包只读逐字证据 + 飞书妙记音频逐字稿 + DeepSeek 单写入 + 完整事实脚手架 + 固定 XML + 远程文档/权限读回 + Base 两阶段回写
 
@@ -31,9 +31,10 @@
   "document_revision_id": 1,
   "report_content_sha256": "远程报告正文 SHA-256",
   "processed_attachment_ids": ["已处理附件 ID"],
-  "contract_version": "6.7.0",
-  "component_build": "6.7.0-skill-6.7.0",
-  "skill_version": "6.7.0",
+  "authorized_uploader_open_ids": ["已读回 full_access 的上传人 open_id"],
+  "contract_version": "6.7.2",
+  "component_build": "6.7.2-skill-6.7.2",
+  "skill_version": "6.7.2",
   "source_corpus_sha256": "最终语料 SHA-256",
   "vision_verification": {},
   "audio_verification": {},
@@ -48,7 +49,9 @@
 }
 ```
 
-它用于识别同案新增附件和旧合同迁移，不承担报告质量、覆盖率或审核逻辑。任何非 `6.7.0` 的旧基线都只在报告 URL、文档 token 和案件标题经远端读回确认同源后进入一次全量迁移；无法证明同源时直接失败，不覆盖旧报告。
+它用于绑定同案附件、上传人、报告 revision 和旧合同迁移，不承担报告质量结论。`6.7.0/6.7.1` 只有完整记录/build/Skill/revision/hash 均一致时才迁移；`6.5.x` 弱基线还必须以基线 token、Base 展示标题、远端标题和案件编号证明同源。完成记录再次触发时仍进入 supplement 全量复核，不以本地基线直接返回 no-op。
+
+事务采用单调提交：候选报告读回通过后先写入同记录阶段绑定，再授权并完成最终提交；最终写后重新读取 Base、报告正文和协作者列表统一验证。失败先分类 `processing/staged/completed/conflict`，禁止无条件回滚或覆盖人工修改。
 
 ## 自动化
 
@@ -72,6 +75,7 @@ targetRecordId = 第 1 步新增案件记录.Record ID
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v6.7.0.zip --json
-unzip -t output/organize-dispute-materials-v6.7.0.zip
+  --output output/organize-dispute-materials-v6.7.2.zip \
+  --expected-version 6.7.2 --json
+unzip -t output/organize-dispute-materials-v6.7.2.zip
 ```

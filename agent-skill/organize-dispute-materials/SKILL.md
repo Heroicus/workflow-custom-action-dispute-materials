@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并经远端读回后两阶段回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.7.0"
+  version: "6.7.2"
   tier: STANDARD
   category: legal-automation
 ---
@@ -16,8 +16,8 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.7.0
-component_build = 6.7.0-skill-6.7.0
+required_skill_version = 6.7.2
+component_build = 6.7.2-skill-6.7.2
 mode = initial | supplement
 main_model = Deepseek-V4-Pro
 vision_agent = 纠纷材料视觉核验员 / Doubao-Seed-2.1-turbo / 只读
@@ -128,8 +128,9 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" scaffold \
 - `evidence_rows` 只列正式证据；程序文书、裁判文书、庭审笔录、内部工作清单不得冒充证据；`completeness_rows` 覆盖全部材料；
 - 金额只来自当前请求；分段计算有金额时，期间、基数、日利率和天数必须同时有材料支持；
 - 身份证号、手机号、银行卡号必须脱敏；正文不得出现模型、工具、文件路径、任务 schema、解析方法、调用参数或运行日志；
-- `quality_rows` 六项检查全部给出用户可理解的业务结论；
-- `base_fields` 只填写有材料依据的案件名称、类型、立案日期、状态；无依据留空。
+- `quality_rows` 已由脚手架按材料清单确定性生成，禁止模型改写；
+- `base_fields.case_name` 必须是材料原文支持的正式案件名称，且在双方主体已知时同时包含双方名称；`filing_date` 必须与 `scalars.filing_date` 同日，类型和状态必须与报告标量一致。案件名称和立案日期同样必须在 `source_refs` 中绑定材料 SHA-256 与逐字引文；不得按字符串公式拼接或自由发挥。
+- 对每个非空且不是“未载明/不适用/待核”的实质事实，在顶层 `source_refs` 中以完整字段路径登记一个或多个 `{"source_sha256":"…","quote":"材料原文逐字引文"}`；引文必须出现在该哈希对应的语料分段，事实值也必须由这些指定来源共同支持。来源引用只用于校验，不渲染进报告。
 
 ```bash
 python3 "$SKILL_ROOT/scripts/report_tool.py" validate-facts \
@@ -188,11 +189,11 @@ lark-cli docs +update --as user \
   --format json > document-write.json
 ```
 
-补充处理必须保留原 document token 和 URL。若快照、token、URL、案件编号、revision 或当前 6.7.0 基线哈希不一致，覆盖前立即失败。
+补充处理必须保留原 document token 和 URL。若快照、token、URL、案件编号、revision 或强基线哈希不一致，覆盖前立即失败。`6.7.0/6.7.1` 必须校验完整记录、build、Skill、revision 和哈希绑定；`6.5.x` 弱基线还必须以 Base 展示标题、远端标题和案件编号证明同源。
 
-## 6. 远端报告与权限读回
+## 6. 候选报告远端读回
 
-写后必须全文读回，且远端章节、表格顺序和全部表格单元格必须与本地 `report.xml` 一致：
+写后必须全文读回。远端节点、文本、章节、表格、列宽向量和链接属性必须与本地 `report.xml` 一致：
 
 ```bash
 lark-cli docs +fetch --as user \
@@ -205,27 +206,20 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate \
   --facts case-facts.json > report-validation.json
 ```
 
-不得把 create/update 成功当成报告成功。对每个上传人分别保存权限读回，禁止相互覆盖：
+不得把 create/update 成功当成报告成功。权限在 Base 阶段写入完成后处理，使已验证候选先获得同记录持久绑定；阶段失败时不创建新的孤儿报告。
 
-```bash
-lark-cli drive +member-add --as user \
-  --token "$document_token" --type docx \
-  --member-type openid --member-id "$uploader_open_id" \
-  --perm full_access --yes --format json > "permissions/$uploader_open_id.add.json"
+## 7. 单调事务提交
 
-python3 "$SKILL_ROOT/scripts/report_tool.py" capture-permission \
-  --document-token "$document_token" \
-  --member-id "$uploader_open_id" \
-  --output "permissions/$uploader_open_id.json"
+事务只允许以下状态前进：
+
+```text
+处理中 → 结果已写入，待最终校验 → 已完成
+                                  ↘ 分析失败（保留已验证报告绑定）
 ```
 
-`capture-permission` 直接以用户身份调用协作者列表接口，并把目标 docx token、规范响应哈希和远端响应固化为回执。只有该 token 的协作者列表真实包含对应 open_id 且 `perm=full_access` 才算通过；缺 scope、只看到添加成功、手工拼 JSON 或无法读回都失败。
-
-## 7. Base 两阶段回写
+任何响应超时或读回失败都先读取 Base、报告和权限并分类；禁止“任一失败先回滚”。
 
 ### 7.1 阶段写入
-
-写前重新读取同一记录；构建命令会重新执行事实、材料、远端报告、权限、附件集合和任务所有权校验。
 
 ```bash
 lark-cli base +record-get --as user \
@@ -249,33 +243,71 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" build-writeback \
   --record-readback record-pre-writeback.json \
   --report-readback report-readback.json \
   --expected-report report.xml \
-  --permissions-dir permissions \
   --output base-stage-update.json \
   --expectation base-stage-expectation.json
 
 lark-cli base +record-batch-update --as user \
   --base-token "$app_token" --table-id "$table_id" \
   --json "$(cat base-stage-update.json)" --format json > base-stage-write.json
-
 lark-cli base +record-get --as user \
   --base-token "$app_token" --table-id "$table_id" \
   --record-id "$record_id" --format json > base-stage-readback.json
-
 python3 "$SKILL_ROOT/scripts/report_tool.py" validate-writeback \
   --input base-stage-readback.json --expectation base-stage-expectation.json
 ```
 
-阶段状态必须仍是 `分析中`，日志为 `结果已写入，待最终校验`；此时不得返回完成。
+Base 可能只读回超链接显示标题；标题只有与同记录基线中的 `document_token/report_url` 同时精确一致才通过。阶段状态仍是“分析中”，不得宣称完成。
 
-### 7.2 最终状态
+阶段写响应不确定时重新读取 Base 并分类：
 
 ```bash
+python3 "$SKILL_ROOT/scripts/report_tool.py" classify-base-state \
+  --runtime runtime.json --record-readback base-stage-readback.json \
+  --staged-expectation base-stage-expectation.json > base-state.json
+```
+
+`staged` 才继续；`processing` 进入第 8 节恢复；其他状态零覆盖。
+
+### 7.2 授权与最终提交前校验
+
+阶段写入后，对每个上传人分别添加权限并远端读回：
+
+```bash
+mkdir -p permissions-final
+while IFS= read -r uploader_open_id; do
+  lark-cli drive +member-add --as user \
+    --token "$document_token" --type docx \
+    --member-type openid --member-id "$uploader_open_id" \
+    --perm full_access --yes --format json > "permissions-final/$uploader_open_id.add.json"
+  python3 "$SKILL_ROOT/scripts/report_tool.py" capture-permission \
+    --document-token "$document_token" --member-id "$uploader_open_id" \
+    --output "permissions-final/$uploader_open_id.json"
+done < <(python3 -c 'import json; print(*json.load(open("runtime.json"))["uploader_open_ids"], sep="\\n")')
+```
+
+随后重新读取同一条 Base 和报告，不复用阶段前回执：
+
+```bash
+lark-cli docs +fetch --as user \
+  --doc "$document_token" --detail full --format json > report-final-pre.json
+lark-cli base +record-get --as user \
+  --base-token "$app_token" --table-id "$table_id" \
+  --record-id "$record_id" --format json > base-final-pre-readback.json
+
 python3 "$SKILL_ROOT/scripts/report_tool.py" build-finalize \
   --runtime runtime.json \
-  --record-readback base-stage-readback.json \
+  --record-readback base-final-pre-readback.json \
+  --staged-expectation base-stage-expectation.json \
+  --report-readback report-final-pre.json \
+  --expected-report report.xml \
+  --permissions-dir permissions-final \
   --output base-finalize-update.json \
   --expectation base-finalize-expectation.json
+```
 
+### 7.3 最终写入与写后统一验证
+
+```bash
 lark-cli base +record-batch-update --as user \
   --base-token "$app_token" --table-id "$table_id" \
   --json "$(cat base-finalize-update.json)" --format json > base-finalize-write.json
@@ -283,49 +315,78 @@ lark-cli base +record-batch-update --as user \
 lark-cli base +record-get --as user \
   --base-token "$app_token" --table-id "$table_id" \
   --record-id "$record_id" --format json > base-final-readback.json
+lark-cli docs +fetch --as user \
+  --doc "$document_token" --detail full --format json > report-final-readback.json
 
-python3 "$SKILL_ROOT/scripts/report_tool.py" validate-writeback \
-  --input base-final-readback.json --expectation base-finalize-expectation.json
+mkdir -p permissions-post-commit
+while IFS= read -r uploader_open_id; do
+  python3 "$SKILL_ROOT/scripts/report_tool.py" capture-permission \
+    --document-token "$document_token" --member-id "$uploader_open_id" \
+    --output "permissions-post-commit/$uploader_open_id.json"
+done < <(python3 -c 'import json; print(*json.load(open("runtime.json"))["uploader_open_ids"], sep="\\n")')
+
+python3 "$SKILL_ROOT/scripts/report_tool.py" validate-completion \
+  --runtime runtime.json \
+  --record-readback base-final-readback.json \
+  --final-expectation base-finalize-expectation.json \
+  --report-readback report-final-readback.json \
+  --expected-report report.xml \
+  --permissions-dir permissions-post-commit > completion.json
 ```
 
-只有最终读回确认 `已完成` 和当前 `dispatch_id` 的完成日志后，才能返回完成。
+只有 `validate-completion` 返回 `status=completed` 才能返回完成。它同时验证最终 Base、附件和上传人集合、报告 token/revision/正文以及全部上传人的 `full_access`。
 
-## 8. 失败与补充回滚
+## 8. 失败分类与恢复
 
-任一门失败时保留原始错误码。若 `supplement` 已覆盖文档，先使用当前候选 revision 恢复 `report-backup.xml`，再读回验证：
-
-```bash
-lark-cli docs +fetch --as user \
-  --doc "$existing_document_token" --detail full --format json > report-rollback-pre.json
-candidate_revision="$(python3 -c 'import json;print(json.load(open("report-rollback-pre.json"))["data"]["document"]["revision_id"])')"
-lark-cli docs +update --as user \
-  --doc "$existing_document_token" --command overwrite \
-  --revision-id "$candidate_revision" --content @report-backup.xml \
-  --format json > report-rollback-write.json
-lark-cli docs +fetch --as user \
-  --doc "$existing_document_token" --detail full --format json > report-rollback-readback.json
-python3 "$SKILL_ROOT/scripts/report_tool.py" verify-snapshot \
-  --input report-rollback-readback.json \
-  --document-token "$existing_document_token" \
-  --snapshot report-backup.xml
-```
-
-只有确实生成过 `base-stage-expectation.json` 时，失败构建命令才附加 `--staged-expectation base-stage-expectation.json`，以恢复阶段写入前的业务字段：
+先读取当前 Base，再按现有期望文件分类：
 
 ```bash
-staged_expectation_arg=""
-test ! -f base-stage-expectation.json || staged_expectation_arg="--staged-expectation base-stage-expectation.json"
-
+staged_arg=""; final_arg=""
+test ! -f base-stage-expectation.json || staged_arg="--staged-expectation base-stage-expectation.json"
+test ! -f base-finalize-expectation.json || final_arg="--final-expectation base-finalize-expectation.json"
 lark-cli base +record-get --as user \
   --base-token "$app_token" --table-id "$table_id" \
-  --record-id "$record_id" --format json > record-pre-failure.json
+  --record-id "$record_id" --format json > record-recovery.json
+python3 "$SKILL_ROOT/scripts/report_tool.py" classify-base-state \
+  --runtime runtime.json --record-readback record-recovery.json \
+  ${staged_arg} ${final_arg} > base-recovery-state.json
+```
 
+分类后的唯一动作：
+
+- `completed`：禁止回滚。重新执行第 7.3 节写后验证；若证据已经变化，只把本任务状态标为失败，保留报告和基线供下次同文档修复。
+- `staged`：候选报告和 Base 绑定已经提交，禁止回滚业务字段或文档；标为失败并保留同一报告，下一次以 supplement 全量复核。
+- `processing`：Base 尚未提交候选。先分类文档；正文仍是任务前精确 revision/hash 时可直接失败，正文是本次已验证候选时必须补做阶段写入后再失败，禁止制造 Base 基线与文档 revision 不一致的“伪回滚”。
+- `failed`：停止，不重复写入。
+- 分类冲突：返回 `unknown`，不得写 Base 或覆盖文档。
+
+`supplement + processing` 的文档分类：
+
+```bash
+lark-cli docs +fetch --as user \
+  --doc "$existing_document_token" --detail full --format json > report-recovery-pre.json
+python3 "$SKILL_ROOT/scripts/report_tool.py" classify-document-state \
+  --input report-recovery-pre.json \
+  --document-token "$existing_document_token" \
+  --original-report report-backup.xml \
+  --original-metadata report-backup.json \
+  --candidate-report report.xml > report-recovery-state.json
+```
+
+- `original`：revision、哈希和正文都仍等于任务前快照，不做文档操作。
+- `candidate`：重新执行报告校验和第 7.1 节阶段写入，把当前 candidate revision/hash 持久绑定到同记录，再用 `--staged-expectation` 标记失败；不得把旧正文覆盖回去。
+- 冲突：零覆盖并返回 `REPORT_ROLLBACK_CONFLICT`。
+
+`initial + processing` 若已经创建并验证候选文档但尚未阶段写入，同样补做第 7.1 节阶段绑定后再标记失败，使重试始终复用同一报告。create 响应未知且无法证明 token 时不猜测、不创建删除指令，返回 `unknown`。
+
+完成上述分类动作后才构建失败回写：
+
+```bash
 python3 "$SKILL_ROOT/scripts/report_tool.py" build-failure \
   --runtime runtime.json --error-code "$error_code" \
-  --record-readback record-pre-failure.json \
-  ${staged_expectation_arg} \
+  --record-readback record-recovery.json \
+  ${staged_arg} ${final_arg} \
   --output base-failure-update.json --expectation base-failure-expectation.json
-
 lark-cli base +record-batch-update --as user \
   --base-token "$app_token" --table-id "$table_id" \
   --json "$(cat base-failure-update.json)" --format json > base-failure-write.json
@@ -336,7 +397,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate-writeback \
   --input base-failure-readback.json --expectation base-failure-expectation.json
 ```
 
-`initial` 失败清空报告链接和基线；`supplement` 在完成文档和 Base 回滚后标记失败。当前记录已不属于本 `dispatch_id` 时，禁止覆盖新任务。
+`build-failure` 使用稳定 v6.7 恢复契约，可以为 6.7.0/6.7.1 滚动发布版本错配回写失败，但仍严格绑定固定 Base、表、字段、记录和原 dispatch；版本不匹配不会再造成永久“分析中”。
 
 ## 返回
 

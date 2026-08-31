@@ -27,6 +27,10 @@ ROW_PATTERN = re.compile(r"<!--([A-Za-z][A-Za-z0-9_]*_rows)-->")
 UNRESOLVED_PATTERN = re.compile(r"\{\{[^{}]+\}\}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 NUMERIC_LITERAL_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?![A-Za-z0-9])")
+CORPUS_SECTION_PATTERN = re.compile(
+    r"^=== [^\n]*?\[sha256=([0-9a-f]{64})\][^\n]* ===\n(.*?)(?=^=== |\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 BASE_FIELD_KEYS = ("case_name", "case_type", "filing_date", "case_status")
 BASE_FIELD_NAMES = {
     "case_name": "案件名称",
@@ -38,9 +42,10 @@ NON_EVIDENTIARY_ROWS = {"completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v2"
 AUDIO_PACK_SCHEMA = "audio-evidence-pack/v1"
 EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.7"
-EXPECTED_SKILL_VERSION = "6.7.0"
-EXPECTED_COMPONENT_BUILD = "6.7.0-skill-6.7.0"
+EXPECTED_SKILL_VERSION = "6.7.2"
+EXPECTED_COMPONENT_BUILD = "6.7.2-skill-6.7.2"
 EXPECTED_OPERATION = "process_target_record"
+STRONG_LEGACY_BASELINE_VERSIONS = {"6.7.0", "6.7.1"}
 EXPECTED_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh"
 EXPECTED_TABLE_ID = "tbllz7nrxSIH8frX"
 EXPECTED_BASELINE_FIELD = "材料处理基线"
@@ -74,6 +79,22 @@ PRC_ID_PATTERN = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 MOBILE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 BANK_CARD_PATTERN = re.compile(r"(?<![0-9A-Za-z])(?:\d[ -]?){15,18}\d(?![0-9A-Za-z])")
 BANK_CARD_CONTEXT_PATTERN = re.compile(r"银行卡|银行账户|银行账号|收款账户|收款账号|付款账户|付款账号|开户行|卡号")
+INTERNAL_REPORT_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9_])(?:lark-cli|python3?|npm|node|subprocess|dispatch_id|component_build|required_skill_version)(?![A-Za-z0-9_])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9_])(?:runtime\.json|case-facts\.json|report_tool\.py|material_tool\.py|vision_tool\.py|audio_tool\.py)(?![A-Za-z0-9_])", re.IGNORECASE),
+    re.compile(r"(?:^|[\s\"'])/(?:Users|private/tmp|tmp|var/folders|home)/", re.IGNORECASE),
+    re.compile(r"odm-v\d+:[A-Za-z0-9_-]+:\d{13}:[a-z0-9]{6}", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9_])(?:agent|rec|fld|tbl)_[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z0-9_])(?:openapi-conversation|AILY_WORKDIR|AGENT_TRACE)(?![A-Za-z0-9_])", re.IGNORECASE),
+)
+SEMANTIC_ATTRIBUTES = {"width", "span", "rowspan", "colspan", "href", "url", "checked", "type"}
+QUALITY_RESULTS = {
+    "事实来源核验": "用户可见事实均通过材料原文支持校验",
+    "当前程序识别": "当前程序、前置程序和关联案件已分层核验",
+    "金额复核": "请求金额及计算字段已按当前请求材料复核",
+    "空值语义": "未载明、不适用、待核和可留空字段已按约定处理",
+    "内部过程泄露": "报告正文未包含模型、工具、路径、任务参数或内部处理细节",
+}
 
 
 class ReportError(Exception):
@@ -197,21 +218,28 @@ def escaped(value: Any, path: str) -> str:
     return html.escape(text, quote=False).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
 
 
-def document_table_widths(root: ET.Element) -> list[int]:
-    widths: list[int] = []
+def document_table_width_vectors(root: ET.Element) -> list[tuple[int, ...]]:
+    vectors: list[tuple[int, ...]] = []
     for table in (item for item in root.iter() if item.tag.rsplit("}", 1)[-1].lower() == "table"):
         colgroup = next((item for item in table if item.tag.rsplit("}", 1)[-1].lower() == "colgroup"), None)
         if colgroup is None:
             raise ReportError("REPORT_LAYOUT_INVALID", "表格缺少 colgroup 列宽定义")
         try:
-            width = sum(
-                int(item.attrib["width"]) * int(item.attrib.get("span", "1"))
+            vector = tuple(
+                width
                 for item in colgroup if item.tag.rsplit("}", 1)[-1].lower() == "col"
+                for width in [int(item.attrib["width"])] * int(item.attrib.get("span", "1"))
             )
         except (KeyError, ValueError) as exc:
             raise ReportError("REPORT_LAYOUT_INVALID", "表格列宽定义不合法") from exc
-        widths.append(width)
-    return widths
+        if not vector:
+            raise ReportError("REPORT_LAYOUT_INVALID", "表格列宽定义为空")
+        vectors.append(vector)
+    return vectors
+
+
+def document_table_widths(root: ET.Element) -> list[int]:
+    return [sum(vector) for vector in document_table_width_vectors(root)]
 
 
 def load_contract(template_path: Path, schema_path: Path) -> tuple[str, dict[str, Any]]:
@@ -346,6 +374,71 @@ def source_literal_supported(value: str, corpus_key: str) -> bool:
     return len(parts) > 1 and all(item in corpus_key for item in parts)
 
 
+def source_literal_supported_by_sections(value: str, sections: Sequence[str]) -> bool:
+    keys = [source_key(section) for section in sections]
+    normalized = source_key(value)
+    if not normalized:
+        return True
+    if any(normalized in key for key in keys):
+        return True
+    parts = [source_key(item) for item in re.split(r"[；;、|/\n]+", value) if source_key(item)]
+    return len(parts) > 1 and all(any(part in key for key in keys) for part in parts)
+
+
+def corpus_sections(source_corpus: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    for match in CORPUS_SECTION_PATTERN.finditer(source_corpus):
+        sections.setdefault(match.group(1), []).append(match.group(2))
+    return {source_hash: "\n".join(values) for source_hash, values in sections.items()}
+
+
+def validate_source_references(
+    facts: dict[str, Any], schema: dict[str, Any], source_corpus: str,
+) -> dict[str, int]:
+    """Bind every substantive visible fact to quoted text from named source hashes."""
+
+    expected = {
+        path: value for path, value in fact_items(facts, schema, evidentiary_only=True)
+        if value and not is_declared_unknown(value)
+    }
+    source_refs = facts.get("source_refs")
+    if not isinstance(source_refs, dict):
+        raise ReportError("SOURCE_REFERENCE_INVALID", "case-facts.json 缺少 source_refs 对象")
+    missing = sorted(set(expected) - set(source_refs))
+    extra = sorted(set(source_refs) - set(expected))
+    if missing or extra:
+        raise ReportError(
+            "SOURCE_REFERENCE_INVALID", "事实来源引用必须与全部实质事实逐项对应",
+            {"missing": missing[:40], "extra": extra[:40]},
+        )
+    sections = corpus_sections(source_corpus)
+    if not sections:
+        raise ReportError("SOURCE_REFERENCE_INVALID", "核验语料缺少 source sha256 分段标识")
+    quote_count = 0
+    for path, value in expected.items():
+        refs = source_refs.get(path)
+        if not isinstance(refs, list) or not refs:
+            raise ReportError("SOURCE_REFERENCE_INVALID", "实质事实缺少来源引用", {"field": path})
+        cited_texts: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for index, ref in enumerate(refs):
+            if not isinstance(ref, dict) or set(ref) != {"source_sha256", "quote"}:
+                raise ReportError("SOURCE_REFERENCE_INVALID", "来源引用字段集不正确", {"field": path, "index": index})
+            source_hash = scalarish(ref.get("source_sha256"))
+            quote = scalar_text(ref.get("quote"), f"source_refs.{path}[{index}].quote")
+            if not re.fullmatch(r"[0-9a-f]{64}", source_hash) or source_hash not in sections:
+                raise ReportError("SOURCE_REFERENCE_INVALID", "来源引用未绑定当前语料中的材料哈希", {"field": path, "index": index})
+            key = (source_hash, source_key(quote))
+            if not key[1] or key in seen or key[1] not in source_key(sections[source_hash]):
+                raise ReportError("SOURCE_QUOTE_UNSUPPORTED", "来源引文未在指定材料中逐字出现", {"field": path, "index": index})
+            seen.add(key)
+            cited_texts.append(sections[source_hash])
+            quote_count += 1
+        if not source_literal_supported_by_sections(value, cited_texts):
+            raise ReportError("FACT_SOURCE_RELATION_UNSUPPORTED", "事实值未被其指定来源材料支持", {"field": path})
+    return {"source_reference_count": len(expected), "source_quote_count": quote_count}
+
+
 def element_text(element: ET.Element) -> str:
     return normalize_text("".join(element.itertext()))
 
@@ -370,6 +463,30 @@ def structure_signature(root: ET.Element) -> list[tuple[str, Any]]:
         elif name == "table":
             signature.append((name, table_rows(element)))
     return signature
+
+
+def document_semantic_signature(root: ET.Element) -> tuple[Any, ...]:
+    """Return visible structure, text and layout/link attributes."""
+
+    def visit(element: ET.Element) -> tuple[Any, ...]:
+        attributes = tuple(sorted(
+            (local_name(key), normalize_text(value))
+            for key, value in element.attrib.items()
+            if local_name(key) in SEMANTIC_ATTRIBUTES
+        ))
+        return (
+            local_name(element.tag),
+            attributes,
+            normalize_text(element.text or ""),
+            tuple(visit(child) for child in element),
+            normalize_text(element.tail or ""),
+        )
+
+    return tuple(visit(child) for child in root)
+
+
+def internal_report_matches(text: str) -> list[str]:
+    return sorted({match.group(0).strip() for pattern in INTERNAL_REPORT_PATTERNS for match in pattern.finditer(text)})
 
 
 def dynamic_table_flags(template: str) -> list[bool]:
@@ -447,6 +564,12 @@ def fact_items(
                 if column != "index":
                     path = f"rows.{marker}[{index}].{column}"
                     yield path, scalar_text(value, path)
+    if evidentiary_only:
+        base_fields = facts.get("base_fields", {})
+        if isinstance(base_fields, dict):
+            for name in ("case_name", "filing_date"):
+                path = f"base_fields.{name}"
+                yield path, scalar_text(base_fields.get(name), path)
 
 
 def fact_values(facts: dict[str, Any], schema: dict[str, Any], evidentiary_only: bool = False) -> Iterable[str]:
@@ -474,6 +597,11 @@ def all_visible_fact_items(facts: dict[str, Any], schema: dict[str, Any]) -> Ite
                         continue
                     path = f"rows.{marker}[{index}].{column}"
                     yield path, scalar_text(value, path)
+    base_fields = facts.get("base_fields", {})
+    if isinstance(base_fields, dict):
+        for name, value in base_fields.items():
+            path = f"base_fields.{name}"
+            yield path, scalar_text(value, path)
 
 
 def numeric_literals(value: str) -> set[str]:
@@ -545,6 +673,17 @@ def contains_bank_card(value: str) -> bool:
     return False
 
 
+def quality_rows_for_manifest(entries: Sequence[dict[str, Any]], required_checks: Sequence[str]) -> list[dict[str, str]]:
+    counts = Counter(scalarish(item.get("status")) or "failed" for item in entries)
+    return [{
+        "index": "1", "check": "材料读取情况",
+        "result": f"共{len(entries)}项，完整{counts['complete']}项，部分{counts['partial']}项，无法解析{counts['failed']}项",
+    }] + [
+        {"index": str(index), "check": check, "result": QUALITY_RESULTS.get(check, "")}
+        for index, check in enumerate(required_checks[1:], 2)
+    ]
+
+
 def build_scaffold(case_number: str, manifest: dict[str, Any], template: str, schema: dict[str, Any]) -> dict[str, Any]:
     entries = manifest_entries(manifest)
     scalars = {name: "" for name in sorted(set(SCALAR_PATTERN.findall(template)))}
@@ -558,18 +697,14 @@ def build_scaffold(case_number: str, manifest: dict[str, Any], template: str, sc
         rows["completeness_rows"].append({
             "index": str(index), "source_check_item": name, "available": availability, "source_note": note,
         })
-    counts = Counter(scalarish(item.get("status")) or "failed" for item in entries)
-    rows["quality_rows"] = [{
-        "index": "1", "check": "材料读取情况",
-        "result": f"共{len(entries)}项，完整{counts['complete']}项，部分{counts['partial']}项，无法解析{counts['failed']}项",
-    }] + [
-        {"index": str(index), "check": check, "result": ""}
-        for index, check in enumerate(schema.get("required_quality_checks", [])[1:], 2)
-    ]
-    return {"scalars": scalars, "rows": rows, "base_fields": {key: "" for key in BASE_FIELD_KEYS}}
+    rows["quality_rows"] = quality_rows_for_manifest(entries, schema.get("required_quality_checks", []))
+    return {
+        "scalars": scalars, "rows": rows, "base_fields": {key: "" for key in BASE_FIELD_KEYS},
+        "source_refs": {},
+    }
 
 
-def validate_manifest_coverage(rows: dict[str, Any], manifest: dict[str, Any]) -> Counter[str]:
+def validate_manifest_coverage(rows: dict[str, Any], manifest: dict[str, Any], schema: dict[str, Any]) -> Counter[str]:
     entries = manifest_entries(manifest)
     expected = [scalarish(item.get("file_name")) for item in entries]
     evidence = [scalarish(row.get("name")) for row in rows["evidence_rows"]]
@@ -584,8 +719,9 @@ def validate_manifest_coverage(rows: dict[str, Any], manifest: dict[str, Any]) -
                 "missing_completeness": sorted((Counter(expected) - Counter(completeness)).elements())[:10],
             },
         )
-    if not rows["quality_rows"]:
-        raise ReportError("MATERIAL_COVERAGE_INCOMPLETE", "AI 输出质量自检表缺少材料读取情况")
+    expected_quality = quality_rows_for_manifest(entries, schema.get("required_quality_checks", []))
+    if rows["quality_rows"] != expected_quality:
+        raise ReportError("QUALITY_GATE_INVALID", "质量自检必须由程序按材料清单确定性生成，不得由模型改写")
     return Counter(scalarish(item.get("status")) or "failed" for item in entries)
 
 
@@ -1031,7 +1167,7 @@ def validate_fact_evidence(
     audio_receipts_dir: Path, audio_transcripts_dir: Path,
 ) -> dict[str, Any]:
     scalars, rows, base_fields = validate_fact_shape(facts, template, schema)
-    counts = validate_manifest_coverage(rows, manifest)
+    counts = validate_manifest_coverage(rows, manifest, schema)
     if counts["partial"] or counts["failed"]:
         raise ReportError(
             "MATERIAL_EXTRACTION_INCOMPLETE", "存在未完整解析的附件，不得生成完成报告",
@@ -1082,6 +1218,7 @@ def validate_fact_evidence(
             "FACT_LITERAL_UNSUPPORTED", "用户可见事实含有无原文支持的内容",
             {"fields": unsupported_facts[:40], "total": len(unsupported_facts)},
         )
+    source_reference_summary = validate_source_references(facts, schema, source_corpus)
     privacy_violations = [
         path for path, value in all_visible_fact_items(facts, schema)
         if PRC_ID_PATTERN.search(value) or MOBILE_PATTERN.search(value) or contains_bank_card(value)
@@ -1090,6 +1227,15 @@ def validate_fact_evidence(
         raise ReportError(
             "PERSONAL_DATA_UNMASKED", "报告事实包含未脱敏身份证号、手机号或银行卡号",
             {"fields": privacy_violations[:40]},
+        )
+    process_violations = [
+        path for path, value in all_visible_fact_items(facts, schema)
+        if internal_report_matches(value)
+    ]
+    if process_violations:
+        raise ReportError(
+            "REPORT_PROCESS_LEAK", "结构化事实或 Base 回写字段包含内部运行过程信息",
+            {"fields": process_violations[:40]},
         )
     validate_semantic_completion(scalars, rows, schema, corpus_key)
     case_type = scalar_text(scalars.get("case_type"), "scalars.case_type")
@@ -1105,16 +1251,31 @@ def validate_fact_evidence(
         raise ReportError("BASE_FIELD_MISMATCH", "报告案件类型与 Base 回写值不一致")
     if case_status in allowed_status - {""} and base_case_status != case_status:
         raise ReportError("BASE_FIELD_MISMATCH", "报告案件状态与 Base 回写值不一致")
+    actual_case_name = scalar_text(base_fields.get("case_name"), "base_fields.case_name")
     known_party_names = [
         value for name in ("our_name", "opponent_name")
         if (value := scalar_text(scalars.get(name), f"scalars.{name}")) and not is_declared_unknown(value)
     ]
-    if known_party_names and not scalar_text(base_fields.get("case_name"), "base_fields.case_name"):
-        raise ReportError("BASE_FIELD_MISSING", "已识别当事人但未生成案件名称")
+    if known_party_names and (
+        not actual_case_name or any(source_key(name) not in source_key(actual_case_name) for name in known_party_names)
+    ):
+        raise ReportError(
+            "BASE_FIELD_MISMATCH", "案件名称必须来自正式材料并包含已核验双方主体",
+            {"required_parties": known_party_names, "actual": actual_case_name},
+        )
+    filing_date = scalar_text(scalars.get("filing_date"), "scalars.filing_date")
+    expected_filing_date = "" if not filing_date or is_declared_unknown(filing_date) else normalize_date(filing_date)
+    actual_filing_date = scalar_text(base_fields.get("filing_date"), "base_fields.filing_date")
+    actual_filing_date = normalize_date(actual_filing_date) if actual_filing_date else ""
+    if actual_filing_date != expected_filing_date:
+        raise ReportError(
+            "BASE_FIELD_MISMATCH", "Base 立案日期必须与报告中已核验立案日期一致",
+            {"expected": expected_filing_date, "actual": actual_filing_date},
+        )
     return {
         "status": "valid", "numeric_literal_count": len(literals), "material_count": sum(counts.values()),
         "complete_materials": counts["complete"], "partial_materials": counts["partial"], "failed_materials": counts["failed"],
-        **vision_summary, **audio_summary,
+        **source_reference_summary, **vision_summary, **audio_summary,
     }
 
 
@@ -1125,17 +1286,27 @@ def validate_report(source: str, template: str, schema: dict[str, Any], facts: d
     template_root = parse_fragment(template)
     compare_structure(actual, template_root, template, schema)
     actual_widths = document_table_widths(actual)
+    actual_vectors = document_table_width_vectors(actual)
+    template_vectors = document_table_width_vectors(template_root)
     expected_width = schema.get("table_width")
     if not isinstance(expected_width, int) or set(actual_widths) != {expected_width}:
         raise ReportError(
             "REPORT_LAYOUT_INVALID", "报告表格总宽不一致",
             {"expected": expected_width, "actual": sorted(set(actual_widths))},
         )
+    if actual_vectors != template_vectors:
+        raise ReportError(
+            "REPORT_LAYOUT_INVALID", "报告表格列宽向量与固定模板不一致",
+            {"mismatched_tables": [index for index, pair in enumerate(zip(actual_vectors, template_vectors)) if pair[0] != pair[1]][:20]},
+        )
     full_text = element_text(actual)
     template_text = element_text(template_root)
     forbidden = [item for item in schema.get("forbidden_text", []) if item and full_text.count(item) > template_text.count(item)]
     if forbidden:
         raise ReportError("REPORT_TEXT_INVALID", "报告包含禁用占位词或错误术语", {"matches": forbidden})
+    internal_matches = internal_report_matches(full_text)
+    if internal_matches:
+        raise ReportError("REPORT_PROCESS_LEAK", "报告包含内部运行过程信息", {"matches": internal_matches[:20]})
     if facts is not None:
         validate_fact_shape(facts, template, schema)
         case_number = scalar_text(facts["scalars"].get("case_number"), "scalars.case_number")
@@ -1152,10 +1323,81 @@ def validate_report(source: str, template: str, schema: dict[str, Any], facts: d
 def validate_remote_matches_expected(remote_source: str, expected_source: str) -> None:
     remote_root = parse_fragment(remote_source)
     expected_root = parse_fragment(expected_source)
-    remote_title = next((element_text(item) for item in remote_root if local_name(item.tag) == "title"), "")
-    expected_title = next((element_text(item) for item in expected_root if local_name(item.tag) == "title"), "")
-    if remote_title != expected_title or structure_signature(remote_root) != structure_signature(expected_root):
-        raise ReportError("REPORT_REMOTE_MISMATCH", "远程文档章节与表格单元格未精确匹配本地渲染结果")
+    if document_semantic_signature(remote_root) != document_semantic_signature(expected_root):
+        raise ReportError("REPORT_REMOTE_MISMATCH", "远程文档正文未精确匹配本地渲染结果")
+
+
+def verify_candidate_report(
+    report_readback: Path, document_token: str, expected_report: Path,
+    expected_revision: int, expected_sha256: str,
+) -> dict[str, Any]:
+    """Ensure a rollback target is still exactly this dispatch's candidate."""
+
+    if expected_revision < 0 or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ReportError("REPORT_STATE_INVALID", "候选报告的修订号或正文哈希不合法")
+    content, revision_id = extract_document_content(report_readback, document_token)
+    actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if revision_id != expected_revision or actual_hash != expected_sha256:
+        raise ReportError("REPORT_ROLLBACK_CONFLICT", "候选报告已被其他修订变更，拒绝覆盖")
+    try:
+        expected_source = expected_report.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReportError("REPORT_UNAVAILABLE", "无法读取本地预期报告", {"reason": str(exc)}) from exc
+    validate_remote_matches_expected(content, expected_source)
+    return {"status": "valid", "document_revision_id": revision_id, "report_content_sha256": actual_hash}
+
+
+def semantically_matches(source: str, expected: str) -> bool:
+    try:
+        validate_remote_matches_expected(source, expected)
+    except ReportError:
+        return False
+    return True
+
+
+def classify_document_state(
+    report_readback: Path, document_token: str, original_report: Path,
+    original_metadata: Path, candidate_report: Path,
+) -> dict[str, Any]:
+    """Classify a supplement document before a monotonic roll-forward."""
+
+    metadata = read_json(original_metadata)
+    try:
+        original = original_report.read_text(encoding="utf-8")
+        candidate = candidate_report.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReportError("REPORT_UNAVAILABLE", "无法读取旧报告快照或本次候选报告", {"reason": str(exc)}) from exc
+    if (
+        scalarish(metadata.get("document_token")) != document_token
+        or scalarish(metadata.get("report_url")) != f"https://aixuexi.feishu.cn/docx/{document_token}"
+        or not isinstance(metadata.get("document_revision_id"), int)
+        or metadata.get("document_revision_id") < 0
+        or scalarish(metadata.get("report_content_sha256")) != hashlib.sha256(original.encode("utf-8")).hexdigest()
+    ):
+        raise ReportError("REPORT_STATE_INVALID", "旧报告快照元数据与快照正文不一致")
+    content, revision_id = extract_document_content(report_readback, document_token)
+    if revision_id is None:
+        raise ReportError("REPORT_READBACK_INVALID", "当前报告读回缺少 revision")
+    current_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    original_identity = (
+        revision_id == metadata.get("document_revision_id")
+        and current_hash == scalarish(metadata.get("report_content_sha256"))
+        and semantically_matches(content, original)
+    )
+    if original_identity:
+        state = "original"
+    elif semantically_matches(content, candidate):
+        state = "candidate"
+    else:
+        raise ReportError(
+            "REPORT_ROLLBACK_CONFLICT", "当前报告既不是任务前快照，也不是本次候选正文，禁止覆盖",
+            {"document_revision_id": revision_id, "report_content_sha256": current_hash},
+        )
+    return {
+        "status": "valid", "state": state, "document_token": document_token,
+        "document_revision_id": revision_id, "report_content_sha256": current_hash,
+        "stage_required": state == "candidate",
+    }
 
 
 def extract_document_content(path: Path, expected_document_token: str = "") -> tuple[str, int | None]:
@@ -1253,7 +1495,8 @@ def snapshot_existing_report(
     validate_runtime_record_snapshot(runtime, record_values)
     document_token = scalarish(runtime.get("existing_document_token"))
     report_url = scalarish(runtime.get("existing_report_url"))
-    if normalize_url(scalarish(record_values.get("AI分析结果"))) != report_url:
+    base_report_title, base_report_url = report_field_reference(record_values.get("AI分析结果"))
+    if base_report_url and base_report_url != report_url:
         raise ReportError("REPORT_STATE_INVALID", "Base 报告链接与 supplement 运行信封不一致")
     content, revision_id = extract_document_content(report_readback, document_token)
     if revision_id is None:
@@ -1265,12 +1508,18 @@ def snapshot_existing_report(
         raise ReportError("REPORT_STATE_INVALID", "材料处理基线不是合法 JSON") from exc
     if not isinstance(baseline, dict) or scalarish(baseline.get("document_token")) != document_token:
         raise ReportError("REPORT_STATE_INVALID", "材料处理基线未绑定旧报告 token")
+    baseline_version = scalarish(baseline.get("contract_version"))
+    current_baseline = baseline_version == EXPECTED_SKILL_VERSION
+    strong_baseline = current_baseline or baseline_version in STRONG_LEGACY_BASELINE_VERSIONS
+    if not strong_baseline and not re.fullmatch(r"6\.5\.\d+", baseline_version):
+        raise ReportError("REPORT_STATE_INVALID", "当前材料处理基线版本不支持安全迁移")
     title = next((element_text(item) for item in parse_fragment(content) if local_name(item.tag) == "title"), "")
     case_number = scalarish(runtime.get("case_number"))
+    if not base_report_title or base_report_title != title:
+        raise ReportError("REPORT_STATE_INVALID", "Base 报告标题与远端报告标题不一致")
     if case_number not in title:
         raise ReportError("REPORT_STATE_INVALID", "旧报告标题未绑定当前案件编号")
-    current_baseline = scalarish(baseline.get("contract_version")) == EXPECTED_SKILL_VERSION
-    if current_baseline:
+    if strong_baseline:
         expected = {
             "app_token": EXPECTED_APP_TOKEN,
             "table_id": EXPECTED_TABLE_ID,
@@ -1282,6 +1531,20 @@ def snapshot_existing_report(
             "report_content_sha256": report_hash,
         }
         mismatches = [key for key, value in expected.items() if baseline.get(key) != value]
+        expected_build = f"{baseline_version}-skill-{baseline_version}"
+        if scalarish(baseline.get("component_build")) != expected_build:
+            mismatches.append("component_build")
+        if scalarish(baseline.get("skill_version")) != baseline_version:
+            mismatches.append("skill_version")
+        processed = baseline.get("processed_attachment_ids")
+        current_attachments = set(runtime.get("attachment_ids", []))
+        if (
+            not isinstance(processed, list)
+            or not processed
+            or len(processed) != len(set(processed))
+            or not all(isinstance(item, str) and item in current_attachments for item in processed)
+        ):
+            mismatches.append("processed_attachment_ids")
         if mismatches:
             raise ReportError(
                 "REPORT_STATE_INVALID", "远程报告修订号或内容已脱离当前基线",
@@ -1297,25 +1560,75 @@ def snapshot_existing_report(
         "document_revision_id": revision_id,
         "report_content_sha256": report_hash,
         "legacy_baseline_migration": not current_baseline,
+        "baseline_contract_version": baseline_version,
     }
 
 
 def normalize_date(value: str) -> str:
     match = re.search(r"\d{4}-\d{2}-\d{2}", value)
-    return match.group(0) if match else value.strip()
+    if match:
+        return match.group(0)
+    chinese = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", value)
+    if chinese:
+        return f"{chinese.group(1)}-{int(chinese.group(2)):02d}-{int(chinese.group(3)):02d}"
+    return value.strip()
 
 
-def normalize_url(value: str) -> str:
-    match = re.search(r"https://[^\s)]+", value)
-    return match.group(0) if match else value.strip()
+def report_field_reference(value: Any) -> tuple[str, str]:
+    """Return the display title and explicit URL from a Base report field."""
+
+    text = normalize_text(scalarish(value))
+    if not text:
+        return "", ""
+    markdown = re.fullmatch(r"\[([^\]]+)\]\((https://aixuexi\.feishu\.cn/docx/[A-Za-z0-9_-]{8,128})\)", text)
+    if markdown:
+        return normalize_text(markdown.group(1)), markdown.group(2)
+    url_match = re.search(r"https://aixuexi\.feishu\.cn/docx/[A-Za-z0-9_-]{8,128}", text)
+    if not url_match:
+        return text, ""
+    title = normalize_text((text[:url_match.start()] + text[url_match.end():]).strip("[]()"))
+    return title, url_match.group(0)
+
+
+def baseline_object(value: Any) -> dict[str, Any] | None:
+    text = scalarish(value)
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def analysis_result_matches(expected_value: Any, actual_value: Any, actual_baseline_value: Any) -> bool:
+    """Compare the report field by title and canonical Base baseline identity.
+
+    The raw Base API can collapse a text hyperlink to its display title.  A
+    title-only readback is valid only when the same record's baseline binds it
+    to the exact expected document token and URL.
+    """
+
+    expected_title, expected_url = report_field_reference(expected_value)
+    actual_title, actual_url = report_field_reference(actual_value)
+    if not expected_title or not expected_url or actual_title != expected_title:
+        return False
+    if actual_url:
+        return actual_url == expected_url
+    baseline = baseline_object(actual_baseline_value)
+    if baseline is None:
+        return False
+    token = scalarish(baseline.get("document_token"))
+    return (
+        expected_url == f"https://aixuexi.feishu.cn/docx/{token}"
+        and scalarish(baseline.get("report_url")) == expected_url
+    )
 
 
 def comparable(field: str, value: Any) -> Any:
     text = scalarish(value)
     if field == BASE_FIELD_NAMES["filing_date"]:
         return normalize_date(text)
-    if field == "AI分析结果":
-        return normalize_url(text)
     if field == "材料处理基线" and text:
         try:
             return json.loads(text)
@@ -1324,7 +1637,14 @@ def comparable(field: str, value: Any) -> Any:
     return text
 
 
-def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
+def validate_runtime_recovery_contract(runtime: dict[str, Any]) -> None:
+    """Validate immutable routing and ownership data without pinning a release.
+
+    Failure recovery must still work when a rolling deployment intentionally
+    rejects the package/build pair.  It may never relax the Base target, field
+    contract, record or dispatch identity.
+    """
+
     allowed_keys = {
         "type", "operation", "app_token", "table_id", "record_id", "dispatch_id", "mode", "case_number",
         "attachment_ids", "new_attachment_ids", "uploader_open_ids", "existing_document_token",
@@ -1335,10 +1655,6 @@ def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
         raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封字段集不正确", {"fields": sorted(runtime)})
     if runtime.get("type") != EXPECTED_RUNTIME_TYPE:
         raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封版本不正确")
-    if runtime.get("required_skill_version") != EXPECTED_SKILL_VERSION:
-        raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封要求的 Skill 版本不正确")
-    if runtime.get("component_build") != EXPECTED_COMPONENT_BUILD:
-        raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封中的小组件 build 不正确")
     if (
         runtime.get("operation") != EXPECTED_OPERATION
         or runtime.get("app_token") != EXPECTED_APP_TOKEN
@@ -1347,9 +1663,6 @@ def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
         or runtime.get("field_contract") != EXPECTED_FIELD_CONTRACT
     ):
         raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封的 Base、操作或字段契约不正确")
-    contract = runtime.get("model_contract")
-    if contract != EXPECTED_MODEL_CONTRACT:
-        raise ReportError("MODEL_CONTRACT_MISMATCH", "运行信封中的主子模型契约不正确")
     record_id = scalarish(runtime.get("record_id"))
     dispatch_id = scalarish(runtime.get("dispatch_id"))
     mode = scalarish(runtime.get("mode"))
@@ -1381,6 +1694,16 @@ def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
         or existing_url != f"https://aixuexi.feishu.cn/docx/{existing_token}"
     ):
         raise ReportError("INVALID_RUNTIME_INPUT", "supplement 信封未精确绑定旧报告 token 和 URL")
+
+
+def validate_runtime_model_contract(runtime: dict[str, Any]) -> None:
+    validate_runtime_recovery_contract(runtime)
+    if runtime.get("required_skill_version") != EXPECTED_SKILL_VERSION:
+        raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封要求的 Skill 版本不正确")
+    if runtime.get("component_build") != EXPECTED_COMPONENT_BUILD:
+        raise ReportError("RUNTIME_CONTRACT_MISMATCH", "运行信封中的小组件 build 不正确")
+    if runtime.get("model_contract") != EXPECTED_MODEL_CONTRACT:
+        raise ReportError("MODEL_CONTRACT_MISMATCH", "运行信封中的主子模型契约不正确")
 
 
 def validate_dispatch_ownership(
@@ -1454,6 +1777,7 @@ def build_writeback(
         "document_revision_id": document_revision_id,
         "report_content_sha256": report_sha256,
         "processed_attachment_ids": sorted(set(attachment_ids)),
+        "authorized_uploader_open_ids": sorted(set(runtime.get("uploader_open_ids", []))),
         "contract_version": schema["schema_version"],
         "component_build": scalarish(runtime.get("component_build")),
         "skill_version": scalarish(runtime.get("required_skill_version")),
@@ -1477,81 +1801,258 @@ def build_writeback(
         "AI处理状态": "分析中",
         "执行日志/失败原因": f"任务 {dispatch_id}：结果已写入，待最终校验",
     })
-    rollback_fields: dict[str, Any] = {}
-    if record_values is not None:
-        for field in patch:
-            if field in {"AI处理状态", "执行日志/失败原因"}:
-                continue
-            value = scalarish(record_values.get(field))
-            if field == BASE_FIELD_NAMES["filing_date"] and value:
-                value = f"{normalize_date(value)} 00:00:00"
-            rollback_fields[field] = value or None
     return {"update_records": {record_id: patch}}, {
         "record_id": record_id, "dispatch_id": dispatch_id, "mode": mode,
-        "phase": "staged", "fields": patch, "rollback_fields": rollback_fields,
+        "phase": "staged", "fields": patch,
+        "source_snapshot": {
+            "case_number": scalarish(runtime.get("case_number")),
+            "attachment_ids": sorted(attachment_ids),
+            "uploader_open_ids": sorted(runtime.get("uploader_open_ids", [])),
+        },
+        "report_binding": baseline,
     }
+
+
+def expectation_belongs_to_runtime(
+    expectation: dict[str, Any], runtime: dict[str, Any], phases: set[str],
+) -> bool:
+    return (
+        scalarish(expectation.get("phase")) in phases
+        and scalarish(expectation.get("record_id")) == scalarish(runtime.get("record_id"))
+        and scalarish(expectation.get("dispatch_id")) == scalarish(runtime.get("dispatch_id"))
+        and scalarish(expectation.get("mode")) == scalarish(runtime.get("mode"))
+        and isinstance(expectation.get("fields"), dict)
+    )
+
+
+def expectation_matches_record(record_values: dict[str, Any], expectation: dict[str, Any]) -> bool:
+    try:
+        validate_writeback_values(record_values, expectation)
+    except ReportError:
+        return False
+    return True
+
+
+def classify_base_state(
+    runtime: dict[str, Any], record_values: dict[str, Any] | None,
+    staged_expectation: dict[str, Any] | None = None,
+    final_expectation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_runtime_recovery_contract(runtime)
+    if record_values is None:
+        raise ReportError("BASE_READBACK_INVALID", "事务分类缺少当前 Base 读回")
+    for state, expectation, phases in (
+        ("completed", final_expectation, {"completed"}),
+        ("staged", staged_expectation, {"staged"}),
+    ):
+        if expectation is None:
+            continue
+        if not expectation_belongs_to_runtime(expectation, runtime, phases):
+            raise ReportError("WRITEBACK_EXPECTATION_INVALID", "事务期望不属于当前任务")
+        if expectation_matches_record(record_values, expectation):
+            return {"status": "valid", "state": state, "dispatch_id": scalarish(runtime.get("dispatch_id"))}
+    try:
+        validate_dispatch_ownership(runtime, record_values, ("处理中",))
+        return {"status": "valid", "state": "processing", "dispatch_id": scalarish(runtime.get("dispatch_id"))}
+    except ReportError:
+        pass
+    dispatch_id = scalarish(runtime.get("dispatch_id"))
+    if (
+        scalarish(record_values.get("AI处理状态")) == "分析失败"
+        and re.fullmatch(rf"任务 {re.escape(dispatch_id)}：失败：[A-Z][A-Z0-9_]{{1,63}}", scalarish(record_values.get("执行日志/失败原因")))
+    ):
+        return {"status": "valid", "state": "failed", "dispatch_id": dispatch_id}
+    raise ReportError("BASE_STATE_CONFLICT", "当前 Base 既不属于处理、阶段或完成状态，禁止补偿覆盖")
 
 
 def build_failure(
     runtime: dict[str, Any], error_code: str, record_values: dict[str, Any] | None,
-    rollback_fields: dict[str, Any] | None = None,
+    staged_expectation: dict[str, Any] | None = None,
+    final_expectation: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    validate_runtime_model_contract(runtime)
-    validate_dispatch_ownership(runtime, record_values, ("处理中", "结果已写入，待最终校验"))
+    validate_runtime_recovery_contract(runtime)
     record_id = scalarish(runtime.get("record_id"))
     dispatch_id = scalarish(runtime.get("dispatch_id"))
     mode = scalarish(runtime.get("mode"))
-    if not record_id or not dispatch_id or mode not in {"initial", "supplement"} or not error_code:
+    if (
+        not record_id or not dispatch_id or mode not in {"initial", "supplement"}
+        or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", error_code)
+    ):
         raise ReportError("INVALID_RUNTIME_INPUT", "无法构建失败回写")
+    classification = classify_base_state(runtime, record_values, staged_expectation, final_expectation)
+    if classification["state"] == "failed":
+        raise ReportError("BASE_STATE_CONFLICT", "当前任务已经进入失败终态，不重复写入")
     patch: dict[str, Any] = {
         "AI处理状态": "分析失败",
         "执行日志/失败原因": f"任务 {dispatch_id}：失败：{error_code}",
     }
-    if mode == "supplement" and rollback_fields:
-        patch.update(rollback_fields)
-    if mode == "initial":
+    if mode == "initial" and classification["state"] == "processing":
+        if record_values is None:
+            raise ReportError("BASE_READBACK_INVALID", "初始失败缺少当前 Base 读回")
+        if scalarish(record_values.get("AI分析结果")) or scalarish(record_values.get("材料处理基线")):
+            raise ReportError("BASE_STATE_CONFLICT", "初始处理状态已经出现报告绑定，禁止清空未知写入")
         patch["AI分析结果"] = None
         patch["材料处理基线"] = None
     return {"update_records": {record_id: patch}}, {
         "record_id": record_id, "dispatch_id": dispatch_id, "mode": mode,
-        "phase": "failed", "fields": patch,
+        "phase": "failed", "fields": patch, "from_state": classification["state"],
     }
+
+
+def validate_report_binding_evidence(
+    runtime: dict[str, Any], binding: Any, report_readback: Path, expected_report: Path,
+    permissions_dir: Path, template: str, schema: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(binding, dict):
+        raise ReportError("WRITEBACK_EXPECTATION_INVALID", "回写期望缺少报告绑定")
+    document_token = scalarish(binding.get("document_token"))
+    report_url = scalarish(binding.get("report_url"))
+    expected_revision = binding.get("document_revision_id")
+    expected_hash = scalarish(binding.get("report_content_sha256"))
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", document_token)
+        or report_url != f"https://aixuexi.feishu.cn/docx/{document_token}"
+        or not isinstance(expected_revision, int) or expected_revision < 0
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
+    ):
+        raise ReportError("WRITEBACK_EXPECTATION_INVALID", "阶段回写期望的报告绑定不合法")
+    content, revision_id = extract_document_content(report_readback, document_token)
+    if revision_id != expected_revision or hashlib.sha256(content.encode("utf-8")).hexdigest() != expected_hash:
+        raise ReportError("REPORT_STATE_INVALID", "远程报告修订号或正文已脱离阶段基线")
+    try:
+        expected_source = expected_report.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReportError("REPORT_UNAVAILABLE", "无法读取本地预期报告", {"reason": str(exc)}) from exc
+    validate_report(content, template, schema)
+    validate_remote_matches_expected(content, expected_source)
+    try:
+        permission_root = permissions_dir.resolve(strict=True)
+    except OSError as exc:
+        raise ReportError("DOC_PERMISSION_READBACK_INVALID", "最终权限读回目录不存在", {"reason": str(exc)}) from exc
+    if not permission_root.is_dir():
+        raise ReportError("DOC_PERMISSION_READBACK_INVALID", "最终权限读回路径不是目录")
+    for member_id in runtime.get("uploader_open_ids", []):
+        validate_permission(permission_root / f"{member_id}.json", member_id, document_token)
+    return binding
+
+
+def validate_completion_evidence(
+    runtime: dict[str, Any], record_values: dict[str, Any] | None,
+    staged_expectation: dict[str, Any], report_readback: Path, expected_report: Path,
+    permissions_dir: Path, template: str, schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove the staged record still names the same source, report and access set."""
+
+    validate_runtime_model_contract(runtime)
+    validate_dispatch_ownership(runtime, record_values, ("结果已写入，待最终校验",))
+    if record_values is None:
+        raise ReportError("BASE_READBACK_INVALID", "最终校验缺少当前 Base 读回")
+    validate_runtime_record_snapshot(runtime, record_values)
+    if not expectation_belongs_to_runtime(staged_expectation, runtime, {"staged"}):
+        raise ReportError("WRITEBACK_EXPECTATION_INVALID", "阶段回写期望不属于当前任务")
+    validate_writeback_values(record_values, staged_expectation)
+    return validate_report_binding_evidence(
+        runtime, staged_expectation.get("report_binding"), report_readback, expected_report,
+        permissions_dir, template, schema,
+    )
 
 
 def build_finalize(
     runtime: dict[str, Any], record_values: dict[str, Any] | None,
+    staged_expectation: dict[str, Any], report_readback: Path, expected_report: Path,
+    permissions_dir: Path, template: str, schema: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_runtime_model_contract(runtime)
-    validate_dispatch_ownership(runtime, record_values, ("结果已写入，待最终校验",))
+    binding = validate_completion_evidence(
+        runtime, record_values, staged_expectation, report_readback, expected_report, permissions_dir, template, schema,
+    )
     record_id = scalarish(runtime.get("record_id"))
     dispatch_id = scalarish(runtime.get("dispatch_id"))
     patch = {
         "AI处理状态": "已完成",
         "执行日志/失败原因": f"任务 {dispatch_id}：已完成",
     }
+    expected_fields = dict(staged_expectation["fields"])
+    expected_fields.update(patch)
     return {"update_records": {record_id: patch}}, {
         "record_id": record_id, "dispatch_id": dispatch_id,
-        "mode": scalarish(runtime.get("mode")), "phase": "completed", "fields": patch,
+        "mode": scalarish(runtime.get("mode")), "phase": "completed", "fields": expected_fields,
+        "source_snapshot": staged_expectation["source_snapshot"],
+        "report_binding": binding,
     }
 
 
-def validate_writeback(readback: Path, expectation: dict[str, Any]) -> dict[str, Any]:
+def validate_final_completion(
+    runtime: dict[str, Any], record_values: dict[str, Any] | None,
+    final_expectation: dict[str, Any], report_readback: Path, expected_report: Path,
+    permissions_dir: Path, template: str, schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Fresh post-commit proof over Base, document content and collaborators."""
+
+    validate_runtime_model_contract(runtime)
+    if record_values is None:
+        raise ReportError("BASE_READBACK_INVALID", "完成校验缺少当前 Base 读回")
+    if not expectation_belongs_to_runtime(final_expectation, runtime, {"completed"}):
+        raise ReportError("WRITEBACK_EXPECTATION_INVALID", "完成期望不属于当前任务")
+    validate_runtime_record_snapshot(runtime, record_values)
+    validate_writeback_values(record_values, final_expectation)
+    binding = validate_report_binding_evidence(
+        runtime, final_expectation.get("report_binding"), report_readback, expected_report,
+        permissions_dir, template, schema,
+    )
+    return {
+        "status": "completed", "record_id": scalarish(runtime.get("record_id")),
+        "dispatch_id": scalarish(runtime.get("dispatch_id")),
+        "processing_status": "已完成", "report_url": scalarish(binding.get("report_url")),
+        "error_code": "",
+    }
+
+
+def validate_writeback_values(actual: dict[str, Any], expectation: dict[str, Any]) -> dict[str, Any]:
     expected_record_id = scalarish(expectation.get("record_id"))
     if not re.fullmatch(r"rec[A-Za-z0-9_-]{1,125}", expected_record_id):
         raise ReportError("WRITEBACK_EXPECTATION_INVALID", "回写期望值缺少合法 record_id")
-    actual = record_field_map(readback, expected_record_id)
     expected = expectation.get("fields")
     if not isinstance(expected, dict):
         raise ReportError("WRITEBACK_EXPECTATION_INVALID", "回写期望值缺少 fields")
     mismatches: dict[str, Any] = {}
     for field, value in expected.items():
+        if field == "AI分析结果":
+            if not analysis_result_matches(value, actual.get(field), actual.get("材料处理基线")):
+                mismatches[field] = {
+                    "expected": report_field_reference(value),
+                    "actual": report_field_reference(actual.get(field)),
+                }
+            continue
         expected_value = comparable(field, value)
         actual_value = comparable(field, actual.get(field))
         if expected_value != actual_value:
             mismatches[field] = {"expected": expected_value, "actual": actual_value}
+    source_snapshot = expectation.get("source_snapshot")
+    if isinstance(source_snapshot, dict):
+        expected_case_number = scalarish(source_snapshot.get("case_number"))
+        expected_attachments = source_snapshot.get("attachment_ids")
+        expected_uploaders = source_snapshot.get("uploader_open_ids")
+        if (
+            not isinstance(expected_attachments, list)
+            or not isinstance(expected_uploaders, list)
+            or scalarish(actual.get("案件编号")) != expected_case_number
+            or record_attachment_ids(actual.get("案件文档")) != sorted(expected_attachments)
+            or record_uploader_ids(actual.get("上传人")) != sorted(expected_uploaders)
+        ):
+            mismatches["$source_snapshot"] = "Base 案件编号、附件或上传人已变更"
+    report_binding = expectation.get("report_binding")
+    if isinstance(report_binding, dict) and baseline_object(actual.get("材料处理基线")) != report_binding:
+        mismatches["$report_binding"] = "材料处理基线已变更"
     if mismatches:
         raise ReportError("BASE_WRITEBACK_VERIFY_FAILED", "Base 同记录回写读回不一致", {"mismatches": mismatches})
     return {"status": "valid", "verified_field_count": len(expected)}
+
+
+def validate_writeback(readback: Path, expectation: dict[str, Any]) -> dict[str, Any]:
+    expected_record_id = scalarish(expectation.get("record_id"))
+    actual = record_field_map(readback, expected_record_id)
+    return validate_writeback_values(actual, expectation)
 
 
 def validate_permission_response(root: dict[str, Any], member_id: str) -> dict[str, Any]:
@@ -1698,6 +2199,18 @@ def build_parser() -> argparse.ArgumentParser:
     verify_snapshot.add_argument("--input", type=Path, required=True)
     verify_snapshot.add_argument("--document-token", required=True)
     verify_snapshot.add_argument("--snapshot", type=Path, required=True)
+    verify_candidate = subparsers.add_parser("verify-candidate")
+    verify_candidate.add_argument("--input", type=Path, required=True)
+    verify_candidate.add_argument("--document-token", required=True)
+    verify_candidate.add_argument("--expected-report", type=Path, required=True)
+    verify_candidate.add_argument("--expected-revision", type=int, required=True)
+    verify_candidate.add_argument("--expected-sha256", required=True)
+    document_state = subparsers.add_parser("classify-document-state")
+    document_state.add_argument("--input", type=Path, required=True)
+    document_state.add_argument("--document-token", required=True)
+    document_state.add_argument("--original-report", type=Path, required=True)
+    document_state.add_argument("--original-metadata", type=Path, required=True)
+    document_state.add_argument("--candidate-report", type=Path, required=True)
     writeback = subparsers.add_parser("build-writeback")
     writeback.add_argument("--runtime", type=Path, required=True)
     writeback.add_argument("--facts", type=Path, required=True)
@@ -1715,7 +2228,6 @@ def build_parser() -> argparse.ArgumentParser:
     writeback.add_argument("--record-readback", type=Path, required=True)
     writeback.add_argument("--report-readback", type=Path, required=True)
     writeback.add_argument("--expected-report", type=Path, required=True)
-    writeback.add_argument("--permissions-dir", type=Path, required=True)
     writeback.add_argument("--output", type=Path, required=True)
     writeback.add_argument("--expectation", type=Path, required=True)
     failure = subparsers.add_parser("build-failure")
@@ -1725,14 +2237,31 @@ def build_parser() -> argparse.ArgumentParser:
     failure.add_argument("--output", type=Path, required=True)
     failure.add_argument("--expectation", type=Path, required=True)
     failure.add_argument("--staged-expectation", type=Path)
+    failure.add_argument("--final-expectation", type=Path)
     finalize = subparsers.add_parser("build-finalize")
     finalize.add_argument("--runtime", type=Path, required=True)
     finalize.add_argument("--record-readback", type=Path, required=True)
+    finalize.add_argument("--staged-expectation", type=Path, required=True)
+    finalize.add_argument("--report-readback", type=Path, required=True)
+    finalize.add_argument("--expected-report", type=Path, required=True)
+    finalize.add_argument("--permissions-dir", type=Path, required=True)
     finalize.add_argument("--output", type=Path, required=True)
     finalize.add_argument("--expectation", type=Path, required=True)
     verify_writeback = subparsers.add_parser("validate-writeback")
     verify_writeback.add_argument("--input", type=Path, required=True)
     verify_writeback.add_argument("--expectation", type=Path, required=True)
+    base_state = subparsers.add_parser("classify-base-state")
+    base_state.add_argument("--runtime", type=Path, required=True)
+    base_state.add_argument("--record-readback", type=Path, required=True)
+    base_state.add_argument("--staged-expectation", type=Path)
+    base_state.add_argument("--final-expectation", type=Path)
+    completion = subparsers.add_parser("validate-completion")
+    completion.add_argument("--runtime", type=Path, required=True)
+    completion.add_argument("--record-readback", type=Path, required=True)
+    completion.add_argument("--final-expectation", type=Path, required=True)
+    completion.add_argument("--report-readback", type=Path, required=True)
+    completion.add_argument("--expected-report", type=Path, required=True)
+    completion.add_argument("--permissions-dir", type=Path, required=True)
     permission = subparsers.add_parser("validate-permission")
     permission.add_argument("--input", type=Path, required=True)
     permission.add_argument("--member-id", required=True)
@@ -1804,6 +2333,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ReportError("REPORT_UNAVAILABLE", "无法读取文档快照", {"reason": str(exc)}) from exc
             validate_remote_matches_expected(content, expected)
             output = {"status": "valid", "document_revision_id": revision_id}
+        elif args.command == "verify-candidate":
+            output = verify_candidate_report(
+                args.input, args.document_token.strip(), args.expected_report,
+                args.expected_revision, args.expected_sha256.strip(),
+            )
+        elif args.command == "classify-document-state":
+            output = classify_document_state(
+                args.input, args.document_token.strip(), args.original_report,
+                args.original_metadata, args.candidate_report,
+            )
         elif args.command == "build-writeback":
             try:
                 corpus = args.source_corpus.read_text(encoding="utf-8")
@@ -1832,14 +2371,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError as exc:
                 raise ReportError("REPORT_UNAVAILABLE", "无法读取本地预期报告", {"reason": str(exc)}) from exc
             validate_remote_matches_expected(remote_content, expected_report)
-            try:
-                permissions_dir = args.permissions_dir.resolve(strict=True)
-            except OSError as exc:
-                raise ReportError("DOC_PERMISSION_READBACK_INVALID", "权限读回目录不存在", {"reason": str(exc)}) from exc
-            if not permissions_dir.is_dir():
-                raise ReportError("DOC_PERMISSION_READBACK_INVALID", "权限读回路径不是目录")
-            for member_id in runtime.get("uploader_open_ids", []):
-                validate_permission(permissions_dir / f"{member_id}.json", member_id, document_token)
             record_id = scalarish(runtime.get("record_id"))
             record_values = record_field_map(args.record_readback, record_id)
             validate_runtime_record_snapshot(runtime, record_values)
@@ -1853,22 +2384,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             output = {"status": "created", "output": str(args.output.resolve()), "expectation": str(args.expectation.resolve())}
         elif args.command == "build-failure":
             runtime = read_json(args.runtime)
-            rollback_fields = None
-            if args.staged_expectation:
-                staged = read_json(args.staged_expectation)
-                value = staged.get("rollback_fields")
-                if (
-                    not isinstance(value, dict)
-                    or staged.get("phase") != "staged"
-                    or scalarish(staged.get("record_id")) != scalarish(runtime.get("record_id"))
-                    or scalarish(staged.get("dispatch_id")) != scalarish(runtime.get("dispatch_id"))
-                    or scalarish(staged.get("mode")) != scalarish(runtime.get("mode"))
-                ):
-                    raise ReportError("WRITEBACK_EXPECTATION_INVALID", "阶段回写期望不包含当前记录的回滚快照")
-                rollback_fields = value
+            staged = read_json(args.staged_expectation) if args.staged_expectation else None
+            final = read_json(args.final_expectation) if args.final_expectation else None
             update, expectation = build_failure(
                 runtime, args.error_code.strip(),
-                record_field_map(args.record_readback, scalarish(runtime.get("record_id"))), rollback_fields,
+                record_field_map(args.record_readback, scalarish(runtime.get("record_id"))), staged, final,
             )
             atomic_write(args.output, json.dumps(update, ensure_ascii=False, separators=(",", ":")))
             atomic_write(args.expectation, json.dumps(expectation, ensure_ascii=False, indent=2))
@@ -1877,12 +2397,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             runtime = read_json(args.runtime)
             update, expectation = build_finalize(
                 runtime, record_field_map(args.record_readback, scalarish(runtime.get("record_id"))),
+                read_json(args.staged_expectation), args.report_readback, args.expected_report,
+                args.permissions_dir, template, schema,
             )
             atomic_write(args.output, json.dumps(update, ensure_ascii=False, separators=(",", ":")))
             atomic_write(args.expectation, json.dumps(expectation, ensure_ascii=False, indent=2))
             output = {"status": "created", "output": str(args.output.resolve()), "expectation": str(args.expectation.resolve())}
         elif args.command == "validate-writeback":
             output = validate_writeback(args.input, read_json(args.expectation))
+        elif args.command == "classify-base-state":
+            runtime = read_json(args.runtime)
+            output = classify_base_state(
+                runtime,
+                record_field_map(args.record_readback, scalarish(runtime.get("record_id"))),
+                read_json(args.staged_expectation) if args.staged_expectation else None,
+                read_json(args.final_expectation) if args.final_expectation else None,
+            )
+        elif args.command == "validate-completion":
+            runtime = read_json(args.runtime)
+            output = validate_final_completion(
+                runtime,
+                record_field_map(args.record_readback, scalarish(runtime.get("record_id"))),
+                read_json(args.final_expectation), args.report_readback, args.expected_report,
+                args.permissions_dir, template, schema,
+            )
         elif args.command == "validate-permission":
             output = validate_permission(args.input, args.member_id.strip(), args.document_token.strip())
         else:

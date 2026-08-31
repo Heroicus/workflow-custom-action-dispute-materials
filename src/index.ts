@@ -17,8 +17,10 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.7.0-skill-6.7.0";
+const BUILD_ID = "6.7.2-skill-6.7.2";
 const REQUEST_TIMEOUT_MS = 10_000;
+const PROCESSING_LEASE_MS = 60 * 60 * 1000;
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const AILY_CHATS_URL = `${OPEN_API}/aily/v1/agents/${ORGANIZER_AGENT_ID}/chats`;
 const RECORD_QUEUES = new Map<string, Promise<void>>();
 
@@ -67,12 +69,14 @@ type MaterialBaseline = {
   reportUrl: string;
   documentRevisionId: number | undefined;
   reportContentSha256: string;
+  authorizedUploaderOpenIds: string[];
+  componentBuild: string;
+  skillVersion: string;
 };
 
 type MaterialDecision =
   | { kind: "initial"; attachmentIds: string[]; newAttachmentIds: string[]; caseNumber: string; uploaderOpenIds: string[] }
-  | { kind: "supplement"; attachmentIds: string[]; newAttachmentIds: string[]; caseNumber: string; uploaderOpenIds: string[]; documentToken: string; reportUrl: string }
-  | { kind: "no_op"; attachmentIds: string[]; newAttachmentIds: string[]; caseNumber: string; uploaderOpenIds: string[] };
+  | { kind: "supplement"; attachmentIds: string[]; newAttachmentIds: string[]; caseNumber: string; uploaderOpenIds: string[]; documentToken: string; reportUrl: string };
 
 class DispatchFailure extends Error {
   readonly code: string;
@@ -348,10 +352,27 @@ function parseBaseline(value: unknown): MaterialBaseline | undefined {
       reportUrl: scalarText(parsed.report_url),
       documentRevisionId: Number.isInteger(documentRevisionId) && documentRevisionId >= 0 ? documentRevisionId : undefined,
       reportContentSha256: scalarText(parsed.report_content_sha256),
+      authorizedUploaderOpenIds: Array.isArray(parsed.authorized_uploader_open_ids)
+        ? [...new Set(parsed.authorized_uploader_open_ids.map(scalarText).filter((id: string) => /^ou_[A-Za-z0-9_-]+$/.test(id)))].sort()
+        : [],
+      componentBuild: scalarText(parsed.component_build),
+      skillVersion: scalarText(parsed.skill_version),
     };
   } catch {
     return undefined;
   }
+}
+
+function isTitleBoundLegacyBaseline(version: string): boolean {
+  return /^6\.5\.\d+$/.test(version);
+}
+
+function isStrongLegacyBaseline(version: string): boolean {
+  return version === "6.7.0" || version === "6.7.1";
+}
+
+function isSupportedLegacyBaseline(version: string): boolean {
+  return isTitleBoundLegacyBaseline(version) || isStrongLegacyBaseline(version);
 }
 
 function decideMaterials(fields: UnknownRecord, recordId: string): MaterialDecision {
@@ -378,7 +399,12 @@ function decideMaterials(fields: UnknownRecord, recordId: string): MaterialDecis
     };
   }
   const currentBaseline = baseline?.contractVersion === REQUIRED_SKILL_VERSION;
-  if (currentBaseline && baseline && (
+  if (baseline && !currentBaseline && !isSupportedLegacyBaseline(baseline.contractVersion)) {
+    throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前材料处理基线版本不支持安全迁移");
+  }
+  const strongBaseline = Boolean(currentBaseline || (baseline && isStrongLegacyBaseline(baseline.contractVersion)));
+  const expectedBaselineBuild = baseline ? `${baseline.contractVersion}-skill-${baseline.contractVersion}` : "";
+  if (strongBaseline && baseline && (
     baseline.appToken !== PRODUCTION_APP_TOKEN
     || baseline.tableId !== PRODUCTION_TABLE_ID
     || baseline.recordId !== recordId
@@ -386,14 +412,27 @@ function decideMaterials(fields: UnknownRecord, recordId: string): MaterialDecis
     || baseline.reportUrl !== `https://aixuexi.feishu.cn/docx/${baseline.documentToken}`
     || baseline.documentRevisionId === undefined
     || !/^[0-9a-f]{64}$/.test(baseline.reportContentSha256)
+    || baseline.componentBuild !== expectedBaselineBuild
+    || baseline.skillVersion !== baseline.contractVersion
   )) {
     throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前材料处理基线未绑定本案件记录和远端报告版本");
   }
+  // The raw Base record API returns only a text field's display title when that
+  // field contains a hyperlink. The baseline token is therefore the canonical
+  // report reference; the Skill fetches that exact document and verifies its
+  // title, revision and content before any supplement overwrite.
   const report = baseline
-    ? resolveReportDocxReference(reportField, baseline.documentToken, Boolean(currentBaseline))
+    ? resolveReportDocxReference(
+      reportField,
+      baseline.documentToken,
+      Boolean(currentBaseline || isSupportedLegacyBaseline(baseline.contractVersion)),
+    )
     : undefined;
   if (!baseline || !report) {
     throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "当前报告链接与材料处理基线不一致");
+  }
+  if (!strongBaseline && baseline.reportUrl && baseline.reportUrl !== report.url) {
+    throw new DispatchFailure("REPORT_STATE_INVALID", "inspect-materials", "旧材料处理基线中的报告链接不一致");
   }
   const reportUrl = report.url;
   const currentSet = new Set(attachmentIdList);
@@ -416,7 +455,7 @@ function decideMaterials(fields: UnknownRecord, recordId: string): MaterialDecis
   return {
     kind: "supplement",
     attachmentIds: attachmentIdList,
-    newAttachmentIds,
+    newAttachmentIds: newAttachmentIds.length ? newAttachmentIds : attachmentIdList,
     caseNumber,
     uploaderOpenIds: uploaderIdList,
     documentToken: baseline.documentToken,
@@ -432,6 +471,24 @@ function makeDispatchId(recordId: string): string {
 
 function taskLog(dispatchId: string, message: string): string {
   return `任务 ${dispatchId}：${message}`;
+}
+
+type ProcessingAttempt = {
+  dispatchId: string;
+  startedAt: number;
+  message: "处理中" | "结果已写入，待最终校验";
+};
+
+function processingAttempt(fields: UnknownRecord, recordId: string): ProcessingAttempt | undefined {
+  if (scalarText(fieldValue(fields, FIELD_PROCESSING_STATUS)) !== "分析中") return undefined;
+  const escapedRecordId = recordId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = scalarText(fieldValue(fields, FIELD_EXECUTION_LOG)).match(
+    new RegExp(`^任务 (odm-v67:${escapedRecordId}:(\\d{13}):[a-z0-9]{6})：(处理中|结果已写入，待最终校验)$`),
+  );
+  if (!match) return undefined;
+  const startedAt = Number(match[2]);
+  if (!Number.isSafeInteger(startedAt)) return undefined;
+  return { dispatchId: match[1], startedAt, message: match[3] as ProcessingAttempt["message"] };
 }
 
 function schemaName(field: UnknownRecord): string {
@@ -538,10 +595,11 @@ async function currentAttemptOwnsRecord(
   token: string,
   target: Target,
   dispatchId: string,
+  allowedMessages: string[] = ["处理中"],
 ): Promise<boolean> {
   const fields = await getRecord(context, token, target);
   return scalarText(fieldValue(fields, FIELD_PROCESSING_STATUS)) === "分析中"
-    && scalarText(fieldValue(fields, FIELD_EXECUTION_LOG)) === taskLog(dispatchId, "处理中");
+    && allowedMessages.some((message) => scalarText(fieldValue(fields, FIELD_EXECUTION_LOG)) === taskLog(dispatchId, message));
 }
 
 async function writeFailureIfOwned(
@@ -644,18 +702,54 @@ basekit.addAction({
       target = { recordId, logId: runtimeLogId(context) };
       token = tenantToken(context);
       validateSchema(await getTableFields(context, token));
-      const fields = await getRecord(context, token, target);
+      let fields = await getRecord(context, token, target);
       const status = scalarText(fieldValue(fields, FIELD_PROCESSING_STATUS));
       if (status === "分析中") {
-        return result(target, "", {
-          accepted: false,
-          dispatchState: "already_running",
-          stage: "inspect-materials",
-          errorCode: "",
-          errorMessage: "",
-          agentChatId: "",
-          mode: "",
-        });
+        const attempt = processingAttempt(fields, target.recordId);
+        if (!attempt) {
+          return result(target, dispatchId, {
+            accepted: false,
+            dispatchState: "rejected",
+            stage: "inspect-materials",
+            errorCode: "PROCESSING_STATE_INVALID",
+            errorMessage: "分析中状态缺少可验证的任务标识，未执行覆盖",
+            agentChatId: "",
+            mode: "",
+          });
+        }
+        const age = Date.now() - attempt.startedAt;
+        if (age < -MAX_CLOCK_SKEW_MS) {
+          return result(target, dispatchId, {
+            accepted: false,
+            dispatchState: "rejected",
+            stage: "inspect-materials",
+            errorCode: "PROCESSING_CLOCK_INVALID",
+            errorMessage: "分析中任务时间戳晚于当前时间，未执行覆盖",
+            agentChatId: "",
+            mode: "",
+          });
+        }
+        if (age <= PROCESSING_LEASE_MS) {
+          return result(target, attempt.dispatchId, {
+            accepted: false,
+            dispatchState: "already_running",
+            stage: "inspect-materials",
+            errorCode: "",
+            errorMessage: "",
+            agentChatId: "",
+            mode: "",
+          });
+        }
+        const stillOwned = await currentAttemptOwnsRecord(
+          context, token, target, attempt.dispatchId, [attempt.message],
+        );
+        if (!stillOwned) {
+          throw new DispatchFailure("BASE_STATE_CONFLICT", "inspect-materials", "过期任务在回收前已被其他运行接管");
+        }
+        if (!(await markFailure(context, token, target, attempt.dispatchId, "TASK_LEASE_EXPIRED", false))) {
+          throw new DispatchFailure("BASE_READBACK_FAILED", "inspect-materials", "过期任务回收状态读回不一致");
+        }
+        fields = await getRecord(context, token, target);
       }
 
       let decision: MaterialDecision;
@@ -665,28 +759,14 @@ basekit.addAction({
         const failure = error instanceof DispatchFailure
           ? error
           : new DispatchFailure("MATERIAL_PREFLIGHT_FAILED", "inspect-materials", safeMessage(error));
-        dispatchId = makeDispatchId(target.recordId);
-        const written = await markFailure(context, token, target, dispatchId, failure.code, false);
         return result(target, dispatchId, {
           accepted: false,
-          dispatchState: "failed",
+          dispatchState: "rejected",
           stage: failure.stage,
-          errorCode: written ? failure.code : "BASE_READBACK_FAILED",
-          errorMessage: written ? safeMessage(failure) : "失败状态读回不一致",
+          errorCode: failure.code,
+          errorMessage: safeMessage(failure),
           agentChatId: "",
           mode: "",
-        });
-      }
-
-      if (decision.kind === "no_op") {
-        return result(target, "", {
-          accepted: true,
-          dispatchState: "already_current",
-          stage: "inspect-materials",
-          errorCode: "",
-          errorMessage: "",
-          agentChatId: "",
-          mode: "no_op",
         });
       }
 

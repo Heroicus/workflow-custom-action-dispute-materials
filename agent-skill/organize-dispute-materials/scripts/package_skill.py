@@ -9,6 +9,7 @@ its root, which is the layout expected by the Aily import flow.
 import argparse
 import hashlib
 import json
+import re
 import sys
 import zipfile
 from dataclasses import dataclass
@@ -100,6 +101,30 @@ def collect_files(root: Path) -> list[PackageFile]:
     return collected
 
 
+def validate_version(root: Path, output: Path, expected: str) -> None:
+    """Prove every release-bearing file and the archive name use one version."""
+
+    if not re.fullmatch(r"\d+\.\d+\.\d+", expected):
+        raise PackageFailure(f"invalid expected version: {expected}")
+    skill = (root / "SKILL.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    agent = (root / "agents/openai.yaml").read_text(encoding="utf-8")
+    report_tool = (root / "scripts/report_tool.py").read_text(encoding="utf-8")
+    schema = json.loads((root / "references/render-schema.json").read_text(encoding="utf-8"))
+    checks = {
+        "SKILL.md": f'version: "{expected}"' in skill,
+        "README.md": readme.startswith(f"# organize-dispute-materials {expected}\n"),
+        "agents/openai.yaml": f"organize-dispute-materials {expected}" in agent,
+        "render-schema.json": schema.get("schema_version") == expected,
+        "report_tool.py skill": f'EXPECTED_SKILL_VERSION = "{expected}"' in report_tool,
+        "report_tool.py build": f'EXPECTED_COMPONENT_BUILD = "{expected}-skill-{expected}"' in report_tool,
+        "output filename": output.name == f"organize-dispute-materials-v{expected}.zip",
+    }
+    failed = [name for name, valid in checks.items() if not valid]
+    if failed:
+        raise PackageFailure(f"release version mismatch: {', '.join(failed)}")
+
+
 def write_package(files: list[PackageFile], output: Path) -> dict[str, object]:
     """Write a deterministic ZIP and return its manifest."""
 
@@ -133,6 +158,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Package a clean root-level Aily Skill ZIP.")
     parser.add_argument("--source", required=True, type=Path, help="Skill source directory")
     parser.add_argument("--output", required=True, type=Path, help="Output ZIP path")
+    parser.add_argument("--expected-version", required=True, help="Version required in every release-bearing file")
     parser.add_argument("--json", action="store_true", help="Print the full manifest JSON")
     return parser.parse_args(argv)
 
@@ -143,6 +169,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parse_args(argv)
     try:
         root = validate_source(args.source)
+        validate_version(root, args.output, args.expected_version)
         files = collect_files(root)
         if not any(item.member == "SKILL.md" for item in files):
             raise PackageFailure("SKILL.md is not at the archive root")

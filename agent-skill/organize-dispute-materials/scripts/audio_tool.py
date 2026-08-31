@@ -691,7 +691,7 @@ def reconcile(
         result = validate_receipt(task, read_object(path), receipts_dir, transcripts_dir)
         transcript_path = Path(str(result["transcript_path"]))
         transcript = transcript_path.read_text(encoding="utf-8", errors="replace").strip()
-        transcripts.append(f"=== 音频逐字稿：{task['source_file']} ===\n{transcript}")
+        transcripts.append(f"=== 音频逐字稿[sha256={task['source_sha256']}]：{task['source_file']} ===\n{transcript}")
         results.append({
             "task_id": task_id,
             "source_file": task["source_file"],
