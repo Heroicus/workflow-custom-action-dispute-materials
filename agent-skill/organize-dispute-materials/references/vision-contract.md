@@ -1,34 +1,45 @@
-# 视觉子智能体契约
+# 视觉证据契约
 
 ## 固定角色
 
 ```text
 名称：纠纷材料视觉核验员
-模型：Doubao-Seed-2.1-turbo
-权限：只读原始图片，只返回证据 JSON
+传输：Aily 图片附件和会话 API
+权限：只读当前图片，只返回证据 JSON
 ```
 
-视觉子智能体不得填写 `case-facts.json`，不得生成或修改报告，不得读写 Base、文档或权限。Deepseek-V4-Pro 主智能体是唯一事实合并者和业务写入者。
+视觉智能体不得填写 `case-facts.json`，不得生成或修改报告，不得读写 Base、文档或权限。纠纷材料整理专员是唯一事实合并者和业务写入者。
 
 ## 输入
 
-主智能体从 `extracted/vision-tasks.json` 逐项调用子智能体。每次只传一张 `image_path` 指向的原图，以及该任务的完整 JSON。不得只传 Tesseract 文本。
+`vision_tool.py collect` 按 `vision-task/v2` 清单顺序执行。每项任务必须完成以下单一链路：
 
-图片包括：独立图片附件、无可用文字层的 PDF 页面，以及 Office 文件中的嵌入图片。PDF 页面固定按 300 DPI 渲染。任务内 `ocr_text` 仅作为对照，不是正确答案。
+1. 验证本地图片快照的文件名、字节数、像素尺寸、转换记录和 SHA-256。
+2. 以飞书用户身份上传一张 Aily 图片附件。
+3. 用该附件和当前任务 JSON 创建一次指定智能体会话。
+4. 读回会话状态和最终文本。
+5. 保存附件请求、附件响应、会话请求、会话创建响应和会话读回响应，并绑定各自 SHA-256。
+
+不得由主智能体自由编排调用。不得合并多项任务。不得用本地路径或 OCR 文字代替图片附件。
+
+图片包括独立图片附件、每一页 PDF 和 Office 文件中的嵌入图片。PDF 页面固定按 300 DPI 渲染。上传工件只能是 PNG 或 JPEG，单件不超过 5 MiB。原图超限时先保留原像素尺寸调整 JPEG 质量，仍超限才逐级降低像素尺寸。任务必须记录输入与输出像素尺寸、格式、质量和字节数。任务内 `ocr_text` 只用于定位，不是事实来源。
 
 ## 输出
 
-必须只返回符合 `vision-result-schema.json` 的一个 `vision-evidence/v2` JSON 对象：
+每次必须只返回符合 `vision-result-schema.json` 的一个 `vision-evidence/v3` JSON 对象。
 
-- `verbatim_text` 只逐字转录可见内容，不总结、不推断、不补全；
-- 看不清的区域写入 `uncertain_regions`；涉及姓名、机构、案号、日期、金额、利率、账号或裁判结果时必须标记 `critical=true`；
-- `status=complete` 表示没有关键内容无法辨认；存在任何关键不确定区域时使用 `partial`，整张图片不可读时使用 `failed`；
-- `source_sha256`、`image_sha256`、`task_id` 必须原样返回；
-- `producer.agent_name` 固定为 `纠纷材料视觉核验员`；
-- `producer.model` 固定为 `Doubao-Seed-2.1-turbo`。
-
-视觉层不负责日期、金额、姓名或其他业务值的规范化，也不返回 `critical_fields` 或 `normalized_value`。这些字段既不参与最终语料，也不应由校验器用启发式规则反推。任何上下文推断都不是视觉证据。
+- `verbatim_text` 只逐字转录可见内容。
+- 不总结，不推断，不补全，不规范化。
+- 看不清的区域写入 `uncertain_regions`。
+- 姓名、机构、案号、日期、金额、利率、账号或裁判结果不确定时，`critical` 必须为 `true`。
+- `status=complete` 表示没有关键内容无法辨认。
+- 存在关键不确定区域时使用 `partial`。
+- 整张图片不可读时使用 `failed`。
+- `source_sha256`、`image_sha256` 和 `task_id` 必须原样返回。
+- `producer.agent_name` 固定为 `纠纷材料视觉核验员`。
+- `producer` 只包含固定的 `agent_name`。
+- 不得返回 Markdown、解释或契约外文字。
 
 ## 成功门
 
-主智能体只允许去除代码围栏后，把每项原始结果保存到 `extracted/vision-results/<task_id>.json`，不得改名字段、补字段、转换 schema 或手工重写，再运行 `vision_tool.py reconcile`。证据包会绑定视觉任务文件、原始语料、最终语料、原文件和图片的 SHA-256；缺少结果、来源哈希不一致、返回含有契约外字段或仍有关键内容不清楚时，整个案件不得返回完成。
+`collect` 严格解析单一 JSON 对象，不修改子智能体输出。任务状态只允许新建、附件已上传、会话已创建、可重试失败和已验证完成。返回格式错误、非完整状态或关键内容不清时在同次运行内最多新建三次会话，不把失败结果缓存为完成。`reconcile` 重新校验图片快照、收集回执、五个请求与远程读回工件哈希、回执集合哈希、任务哈希和结果契约。缺少任务结果、回执不完整、来源哈希不一致、返回契约外字段或仍有关键内容不清楚时，整个案件不得返回完成。

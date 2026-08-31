@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "vision-evidence/v2",
+  "$id": "vision-evidence/v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -14,17 +14,16 @@
     "uncertain_regions"
   ],
   "properties": {
-    "schema_version": { "const": "vision-evidence/v2" },
+    "schema_version": { "const": "vision-evidence/v3" },
     "task_id": { "type": "string", "pattern": "^vis_[0-9a-f]{20}$" },
     "source_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "image_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "producer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent_name", "model"],
+      "required": ["agent_name"],
       "properties": {
-        "agent_name": { "const": "纠纷材料视觉核验员" },
-        "model": { "const": "Doubao-Seed-2.1-turbo" }
+        "agent_name": { "const": "纠纷材料视觉核验员" }
       }
     },
     "status": { "enum": ["complete", "partial", "failed"] },

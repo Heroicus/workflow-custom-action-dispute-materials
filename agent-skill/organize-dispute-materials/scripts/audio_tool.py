@@ -13,13 +13,17 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from evidence_contract import (
+    AUDIO_PACK_SCHEMA as PACK_SCHEMA,
+    AUDIO_RESULT_SCHEMA as RESULT_SCHEMA,
+    AUDIO_TASK_SCHEMA as TASK_SCHEMA,
+    MAIN_AGENT_NAME,
+)
 
-TASK_SCHEMA = "audio-task/v1"
-RESULT_SCHEMA = "audio-evidence/v1"
-PACK_SCHEMA = "audio-evidence-pack/v1"
 EXPECTED_POLICY = {
     "transcriber": "Feishu Minutes",
     "identity": "user",
@@ -29,17 +33,19 @@ EXPECTED_POLICY = {
 }
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".wma", ".amr"}
 TASK_KEYS = {
-    "schema_version", "task_id", "source_file", "source_sha256", "media_path",
+    "schema_version", "task_id", "source_file", "source_sha256", "media_file",
     "media_sha256", "media_suffix", "size_bytes",
 }
 RESULT_KEYS = {
     "schema_version", "task_id", "source_sha256", "media_sha256", "provider",
-    "status", "file_token", "minute_token", "minute_url", "transcript_path",
+    "status", "file_token", "minute_token", "minute_url", "transcript_file",
     "transcript_sha256", "transcript_chars", "remote_readback", "reuse_source",
+    "transmitted_sha256", "transmitted_size_bytes", "reuse_task_id",
 }
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TASK_ID = re.compile(r"^aud_[0-9a-f]{20}$")
 MINUTE_TOKEN = re.compile(r"^[a-z0-9]{8,128}$")
+MINUTE_URL = re.compile(r"^https://[^\s]+/minutes/([a-z0-9]{8,128})(?:[/?#].*)?$")
 FILE_TOKEN = re.compile(r"^[A-Za-z0-9_-]{4,256}$")
 
 
@@ -59,6 +65,8 @@ def atomic_write(path: Path, content: str) -> None:
         "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False,
     ) as handle:
         handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
         temporary = Path(handle.name)
     temporary.replace(path)
 
@@ -123,7 +131,77 @@ def first_text(value: Any, *keys: str) -> str:
     return ""
 
 
-def load_tasks(path: Path) -> list[dict[str, Any]]:
+def owned_media(media_root: Path, name: str, task_id: str) -> Path:
+    relative = Path(name)
+    if relative.is_absolute() or len(relative.parts) != 1 or relative.name != name:
+        raise AudioError("AUDIO_TASKS_INVALID", "音频工件名必须是单层相对路径", {"task_id": task_id})
+    media_root = media_root.resolve()
+    media = (media_root / relative).resolve()
+    try:
+        media.relative_to(media_root)
+    except ValueError as exc:
+        raise AudioError("AUDIO_TASKS_INVALID", "音频工件越出任务目录", {"task_id": task_id}) from exc
+    return media
+
+
+def media_fingerprint(media: Path) -> tuple[int, int, int, int, str]:
+    try:
+        stat = media.stat()
+    except OSError as exc:
+        raise AudioError("AUDIO_SNAPSHOT_INVALID", "音频工件不存在", {"file": media.name}) from exc
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, sha256_file(media)
+
+
+def verify_media(task: dict[str, Any], media_root: Path) -> tuple[Path, tuple[int, int, int, int, str]]:
+    task_id = str(task["task_id"])
+    media = owned_media(media_root, str(task["media_file"]), task_id)
+    if media.suffix.lower() != str(task["media_suffix"]).lower():
+        raise AudioError("AUDIO_TASKS_INVALID", "音频工件后缀与任务格式不一致", {"task_id": task_id})
+    fingerprint = media_fingerprint(media)
+    if fingerprint[2] != task["size_bytes"] or fingerprint[4] != task["media_sha256"]:
+        raise AudioError(
+            "AUDIO_SNAPSHOT_INVALID", "音频工件与不可变快照不一致",
+            {"task_id": task_id, "expected_size": task["size_bytes"], "actual_size": fingerprint[2]},
+        )
+    return media, fingerprint
+
+
+@contextmanager
+def stable_upload_snapshot(task: dict[str, Any], media_root: Path) -> Iterator[Path]:
+    """Expose one private, verified byte copy to the upload command."""
+
+    media, before = verify_media(task, media_root)
+    with tempfile.TemporaryDirectory(prefix="odm-audio-upload-") as directory:
+        root = Path(directory)
+        destination = root / f"media{str(task['media_suffix'])}"
+        digest = hashlib.sha256()
+        size = 0
+        with media.open("rb") as reader, destination.open("xb") as writer:
+            opened = os.fstat(reader.fileno())
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+            closed = os.fstat(reader.fileno())
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if any(getattr(opened, key) != getattr(closed, key) for key in stable_fields):
+            raise AudioError("AUDIO_SNAPSHOT_INVALID", "音频工件在创建上传快照时发生变化", {"task_id": task["task_id"]})
+        if size != task["size_bytes"] or digest.hexdigest() != task["media_sha256"]:
+            raise AudioError("AUDIO_SNAPSHOT_INVALID", "音频上传快照与任务不一致", {"task_id": task["task_id"]})
+        destination.chmod(0o444)
+        root.chmod(0o555)
+        try:
+            yield destination
+        finally:
+            root.chmod(0o700)
+            _, after = verify_media(task, media_root)
+            if before != after or sha256_file(destination) != task["media_sha256"]:
+                raise AudioError("AUDIO_SNAPSHOT_INVALID", "音频工件在上传期间发生变化", {"task_id": task["task_id"]})
+
+
+def load_tasks(path: Path, media_root: Path) -> list[dict[str, Any]]:
     root = read_object(path, "AUDIO_TASKS_INVALID")
     require_keys(
         root, {"schema_version", "policy", "tasks", "summary"},
@@ -148,12 +226,12 @@ def load_tasks(path: Path) -> list[dict[str, Any]]:
             raise AudioError("AUDIO_TASKS_INVALID", "音频任务版本、ID 格式或唯一性不正确", {"task_id": task_id})
         if not HEX64.fullmatch(source_hash) or not HEX64.fullmatch(media_hash) or suffix not in AUDIO_SUFFIXES:
             raise AudioError("AUDIO_TASKS_INVALID", "音频任务哈希或格式不正确", {"task_id": task_id})
+        if source_hash != media_hash:
+            raise AudioError("AUDIO_TASKS_INVALID", "未转码音频的来源哈希必须与媒体哈希一致", {"task_id": task_id})
         size = item.get("size_bytes")
         if type(size) is not int or size <= 0 or size > 6 * 1024 * 1024 * 1024:
             raise AudioError("AUDIO_LIMIT_INVALID", "音频大小必须在 0 到 6GB 之间", {"task_id": task_id, "size": size})
-        media = Path(required_text(item.get("media_path"), f"tasks[{index}].media_path", "AUDIO_TASKS_INVALID"))
-        if not media.is_file() or media.stat().st_size != size or sha256_file(media) != media_hash:
-            raise AudioError("AUDIO_FILE_CHANGED", "音频文件不存在、大小或哈希不一致", {"task_id": task_id})
+        verify_media(item, media_root)
         seen.add(task_id)
         tasks.append(item)
     if root.get("summary") != {"total": len(tasks), "pending": len(tasks)}:
@@ -243,7 +321,7 @@ def valid_minute_token(value: str) -> bool:
 
 
 def minute_from_url(value: str) -> str:
-    match = re.search(r"/minutes/([a-z0-9]{8,128})(?:[/?#]|$)", value)
+    match = MINUTE_URL.fullmatch(value)
     return match.group(1) if match else ""
 
 
@@ -301,6 +379,24 @@ def safe_transcript_path(value: str, cwd: Path, allowed_root: Path) -> Path | No
     return candidate if candidate.is_file() else None
 
 
+def owned_transcript(value: str, transcripts_dir: Path, task_id: str) -> Path:
+    relative = Path(value)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise AudioError("AUDIO_RESULT_INVALID", "音频逐字稿必须使用相对路径", {"task_id": task_id})
+    root = transcripts_dir.resolve()
+    transcript = (root / relative).resolve()
+    try:
+        transcript.relative_to(root)
+    except ValueError as exc:
+        raise AudioError("AUDIO_RESULT_INVALID", "音频逐字稿越出本次输出目录", {"task_id": task_id}) from exc
+    return transcript
+
+
+def transcript_locator(value: str) -> str:
+    parts = [part for part in Path(value).parts if part not in {"/", "\\"}]
+    return "/".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "")
+
+
 def locate_transcript(response: dict[str, Any], cwd: Path, output_root: Path) -> Path | None:
     for value in keyed_values(response, "transcript_file"):
         if isinstance(value, str):
@@ -327,6 +423,12 @@ def validate_saved_upload_semantics(result: dict[str, Any], receipts_dir: Path) 
     }
     if drive_tokens != {file_token}:
         raise AudioError("AUDIO_REMOTE_READBACK_INVALID", "云空间上传响应与回执 file_token 不一致", {"task_id": task_id})
+    returned_sizes = {
+        item for key in ("size", "size_bytes") for item in keyed_values(drive, key)
+        if type(item) is int
+    }
+    if returned_sizes and returned_sizes != {result["transmitted_size_bytes"]}:
+        raise AudioError("AUDIO_REMOTE_READBACK_INVALID", "云空间上传响应字节数与快照不一致", {"task_id": task_id})
 
     minute = load_saved_response(
         response_path(receipts_dir, task_id, "minute"),
@@ -364,16 +466,17 @@ def validate_saved_remote_semantics(
     target_items = [item for item in minute_items if str(item["minute_token"]).strip() == minute_token]
     if any(meaningful_error(item.get("error")) for item in target_items):
         raise AudioError("AUDIO_REMOTE_READBACK_INVALID", "逐字稿响应中的目标妙记仍返回错误", {"task_id": task_id})
-    cwd = transcripts_dir.resolve().parent
-    resolved_transcripts = {
-        path.resolve()
+    returned_transcripts = {
+        transcript_locator(value)
         for item in target_items
         for value in keyed_values(item, "transcript_file")
         if isinstance(value, str)
-        for path in [safe_transcript_path(value, cwd, transcripts_dir)]
-        if path is not None
+        and transcript_locator(value)
     }
-    if resolved_transcripts != {transcript.resolve()}:
+    expected_locator = transcript_locator(
+        transcript.resolve().relative_to(transcripts_dir.resolve()).as_posix()
+    )
+    if returned_transcripts != {expected_locator}:
         raise AudioError("AUDIO_REMOTE_READBACK_INVALID", "逐字稿响应路径与回执不一致", {"task_id": task_id})
 
 
@@ -467,7 +570,8 @@ def write_partial_state(path: Path, task: dict[str, Any], values: dict[str, str]
 
 def build_receipt(
     task: dict[str, Any], values: dict[str, str], transcript: Path,
-    detail_sha256: str, reuse_source: str, drive_sha256: str, upload_sha256: str,
+    transcripts_dir: Path, detail_sha256: str, reuse_source: str,
+    drive_sha256: str, upload_sha256: str, reuse_task_id: str = "",
 ) -> dict[str, Any]:
     transcript_text = transcript.read_text(encoding="utf-8", errors="replace")
     if len(re.sub(r"\s+", "", transcript_text)) < 2:
@@ -477,12 +581,14 @@ def build_receipt(
         "task_id": task["task_id"],
         "source_sha256": task["source_sha256"],
         "media_sha256": task["media_sha256"],
+        "transmitted_sha256": task["media_sha256"],
+        "transmitted_size_bytes": task["size_bytes"],
         "provider": {"service": "Feishu Minutes", "identity": "user", "mode": "remote_transcript_readback"},
         "status": "complete",
         "file_token": values.get("file_token", ""),
         "minute_token": values["minute_token"],
         "minute_url": values.get("minute_url", ""),
-        "transcript_path": str(transcript.resolve()),
+        "transcript_file": transcript.resolve().relative_to(transcripts_dir.resolve()).as_posix(),
         "transcript_sha256": sha256_file(transcript),
         "transcript_chars": len(re.sub(r"\s+", "", transcript_text)),
         "remote_readback": {
@@ -491,14 +597,15 @@ def build_receipt(
             "minute_detail_response_sha256": detail_sha256,
         },
         "reuse_source": reuse_source,
+        "reuse_task_id": reuse_task_id,
     }
 
 
 def transcribe(
-    tasks_path: Path, receipts_dir: Path, transcripts_dir: Path,
+    tasks_path: Path, media_root: Path, receipts_dir: Path, transcripts_dir: Path,
     cli: str, wait_seconds: int, poll_seconds: int, command_timeout: int,
 ) -> dict[str, Any]:
-    tasks = load_tasks(tasks_path)
+    tasks = load_tasks(tasks_path, media_root)
     if not tasks:
         return {
             "status": "complete", "expected": 0, "received": 0,
@@ -530,6 +637,7 @@ def transcribe(
                 "source_sha256": task["source_sha256"],
                 "media_sha256": media_hash,
                 "reuse_source": "same_run",
+                "reuse_task_id": shared_task_id,
             })
             atomic_write(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2))
             validate_receipt(task, receipt, receipts_dir, transcripts_dir)
@@ -557,11 +665,11 @@ def transcribe(
             reuse_source = "retry_state" if values else "new_upload"
         if not values.get("minute_token"):
             if not values.get("file_token"):
-                media = Path(str(task["media_path"])).resolve()
-                drive_response, drive_raw = run_lark(
-                    str(executable), ["drive", "+upload", "--as", "user", "--file", media.name, "--json"],
-                    media.parent, command_timeout, "音频上传到云空间",
-                )
+                with stable_upload_snapshot(task, media_root) as upload_media:
+                    drive_response, drive_raw = run_lark(
+                        str(executable), ["drive", "+upload", "--as", "user", "--file", upload_media.name, "--json"],
+                        upload_media.parent, command_timeout, "音频上传到云空间",
+                    )
                 file_token = first_text(drive_response, "file_token")
                 if not valid_file_token(file_token):
                     raise AudioError("AUDIO_REMOTE_RESPONSE_INVALID", "云空间上传响应缺少 file_token", {"task_id": task_id})
@@ -596,7 +704,8 @@ def transcribe(
                 {"task_id": task_id},
             )
         receipt = build_receipt(
-            task, values, transcript, detail_sha256, reuse_source, drive_sha256, upload_sha256,
+            task, values, transcript, transcripts_dir, detail_sha256, reuse_source,
+            drive_sha256, upload_sha256,
         )
         atomic_write(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2))
         state_path.unlink(missing_ok=True)
@@ -619,6 +728,8 @@ def validate_receipt_header(task: dict[str, Any], result: dict[str, Any]) -> dic
         or result.get("task_id") != task_id
         or result.get("source_sha256") != task.get("source_sha256")
         or result.get("media_sha256") != task.get("media_sha256")
+        or result.get("transmitted_sha256") != task.get("media_sha256")
+        or result.get("transmitted_size_bytes") != task.get("size_bytes")
         or result.get("status") != "complete"
     ):
         raise AudioError("AUDIO_RESULT_INVALID", "音频结果版本、任务、哈希或状态不正确", {"task_id": task_id})
@@ -642,6 +753,11 @@ def validate_receipt_header(task: dict[str, Any], result: dict[str, Any]) -> dic
     reuse_source = result.get("reuse_source")
     if reuse_source not in {"new_upload", "same_run", "retry_state", "receipt_refresh"}:
         raise AudioError("AUDIO_RESULT_INVALID", "音频复用来源不正确", {"task_id": task_id})
+    reuse_task_id = result.get("reuse_task_id")
+    if not isinstance(reuse_task_id, str) or (
+        reuse_source == "same_run" and (not TASK_ID.fullmatch(reuse_task_id) or reuse_task_id == task_id)
+    ) or (reuse_source != "same_run" and reuse_task_id):
+        raise AudioError("AUDIO_RESULT_INVALID", "音频复用任务绑定不正确", {"task_id": task_id})
     for key in (
         "drive_upload_response_sha256", "minute_upload_response_sha256", "minute_detail_response_sha256",
     ):
@@ -656,11 +772,10 @@ def validate_receipt(
 ) -> dict[str, Any]:
     result = validate_receipt_header(task, result)
     task_id = str(task["task_id"])
-    transcript = Path(required_text(result.get("transcript_path"), f"{task_id}.transcript_path")).resolve()
-    try:
-        transcript.relative_to(transcripts_dir.resolve())
-    except ValueError as exc:
-        raise AudioError("AUDIO_RESULT_INVALID", "音频逐字稿路径不在本次输出目录", {"task_id": task_id}) from exc
+    transcript = owned_transcript(
+        required_text(result.get("transcript_file"), f"{task_id}.transcript_file"),
+        transcripts_dir, task_id,
+    )
     if not transcript.is_file() or sha256_file(transcript) != result.get("transcript_sha256"):
         raise AudioError("AUDIO_TRANSCRIPT_CHANGED", "音频逐字稿不存在或哈希不一致", {"task_id": task_id})
     transcript_chars = result.get("transcript_chars")
@@ -671,15 +786,16 @@ def validate_receipt(
 
 
 def reconcile(
-    tasks_path: Path, receipts_dir: Path, transcripts_dir: Path, source_corpus_path: Path,
+    tasks_path: Path, media_root: Path, receipts_dir: Path, transcripts_dir: Path, source_corpus_path: Path,
     output_corpus_path: Path, evidence_path: Path,
 ) -> dict[str, Any]:
-    tasks = load_tasks(tasks_path)
+    tasks = load_tasks(tasks_path, media_root)
     try:
         source_corpus = source_corpus_path.read_text(encoding="utf-8")
     except OSError as exc:
         raise AudioError("SOURCE_CORPUS_UNAVAILABLE", "无法读取视觉核验后的材料语料", {"reason": str(exc)}) from exc
     results: list[dict[str, Any]] = []
+    validated_receipts: dict[str, dict[str, Any]] = {}
     unresolved: list[dict[str, str]] = []
     transcripts: list[str] = []
     for task in tasks:
@@ -689,7 +805,8 @@ def reconcile(
             unresolved.append({"task_id": task_id, "reason": "missing_receipt"})
             continue
         result = validate_receipt(task, read_object(path), receipts_dir, transcripts_dir)
-        transcript_path = Path(str(result["transcript_path"]))
+        validated_receipts[task_id] = result
+        transcript_path = owned_transcript(str(result["transcript_file"]), transcripts_dir, task_id)
         transcript = transcript_path.read_text(encoding="utf-8", errors="replace").strip()
         transcripts.append(f"=== 音频逐字稿[sha256={task['source_sha256']}]：{task['source_file']} ===\n{transcript}")
         results.append({
@@ -702,12 +819,21 @@ def reconcile(
             "file_token": result["file_token"],
             "minute_token": result["minute_token"],
             "minute_url": result["minute_url"],
-            "transcript_path": result["transcript_path"],
+            "transcript_file": result["transcript_file"],
             "transcript_sha256": result["transcript_sha256"],
             "transcript_chars": result["transcript_chars"],
+            "transmitted_sha256": result["transmitted_sha256"],
+            "transmitted_size_bytes": result["transmitted_size_bytes"],
             "remote_readback": result["remote_readback"],
             "reuse_source": result["reuse_source"],
+            "reuse_task_id": result["reuse_task_id"],
         })
+    for task_id, result in validated_receipts.items():
+        if result["reuse_source"] != "same_run":
+            continue
+        reused = validated_receipts.get(str(result["reuse_task_id"]))
+        if reused is None or reused["media_sha256"] != result["media_sha256"]:
+            raise AudioError("AUDIO_RESULT_INVALID", "音频复用任务未绑定同一媒体", {"task_id": task_id})
     verified = source_corpus.rstrip() + "\n\n" + "\n\n".join(transcripts) + "\n" if transcripts else source_corpus
     evidence = {
         "schema_version": PACK_SCHEMA,
@@ -715,7 +841,7 @@ def reconcile(
             "provider": "Feishu Minutes",
             "identity": "user",
             "remote_transcript_readback": True,
-            "main_writer": "Deepseek-V4-Pro",
+            "main_writer": MAIN_AGENT_NAME,
             "single_writer": True,
         },
         "tasks": results,
@@ -748,6 +874,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     upload = subparsers.add_parser("transcribe")
     upload.add_argument("--tasks", type=Path, required=True)
+    upload.add_argument("--media-root", type=Path, required=True)
     upload.add_argument("--receipts-dir", type=Path, required=True)
     upload.add_argument("--transcripts-dir", type=Path, required=True)
     upload.add_argument("--lark-cli", default="lark-cli")
@@ -756,6 +883,7 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--command-timeout", type=int, default=180)
     verify = subparsers.add_parser("reconcile")
     verify.add_argument("--tasks", type=Path, required=True)
+    verify.add_argument("--media-root", type=Path, required=True)
     verify.add_argument("--receipts-dir", type=Path, required=True)
     verify.add_argument("--transcripts-dir", type=Path, required=True)
     verify.add_argument("--source-corpus", type=Path, required=True)
@@ -771,12 +899,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.wait_seconds < 1 or args.poll_seconds < 1 or args.command_timeout < 1:
                 raise AudioError("AUDIO_ARGUMENT_INVALID", "等待、轮询和命令超时必须为正整数")
             output = transcribe(
-                args.tasks, args.receipts_dir, args.transcripts_dir,
+                args.tasks, args.media_root, args.receipts_dir, args.transcripts_dir,
                 args.lark_cli, args.wait_seconds, args.poll_seconds, args.command_timeout,
             )
         else:
             output = reconcile(
-                args.tasks, args.receipts_dir, args.transcripts_dir, args.source_corpus,
+                args.tasks, args.media_root, args.receipts_dir, args.transcripts_dir, args.source_corpus,
                 args.output_corpus, args.evidence,
             )
         print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))

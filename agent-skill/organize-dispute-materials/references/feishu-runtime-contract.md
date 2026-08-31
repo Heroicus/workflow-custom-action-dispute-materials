@@ -15,10 +15,10 @@ record_id = 运行信封中的 record_id
 
 ```text
 用户身份读取同一记录并校验 dispatch 所有权
-→ 下载全部附件，绑定下载回执、record_id、字段 ID、附件 token、路径和字节数
-→ OCR 只提供定位提示，Doubao-Seed-2.1-turbo 直接读原图并返回只读逐字证据
+→ 下载全部附件，生成下载封印，绑定原始回执哈希、record_id、字段 ID、附件 token、路径、字节数和 SHA-256
+→ OCR 只提供定位提示，纠纷材料视觉核验员通过单图附件会话返回只读逐字证据
 → Feishu Minutes 上传音频并远端读回逐字稿
-→ Deepseek-V4-Pro 从统一核验语料唯一生成事实
+→ 纠纷材料整理专员从统一核验语料唯一生成事实
 → report_tool.py 使用固定 XML 模板渲染并本地校验
 → supplement 先校验并快照旧 token/revision/内容哈希，再按 revision 乐观覆盖
 → 远端读回目标文档 token、revision、全部可见节点、表格列宽向量和链接属性
@@ -30,11 +30,11 @@ record_id = 运行信封中的 record_id
 
 不复制远程模板，不使用 append，不扫描云盘、工作区、历史会话或其他 Base 记录。
 
-## 模型职责
+## 智能体职责
 
 ```text
-Deepseek-V4-Pro         主智能体、唯一事实合并者、唯一业务写入者
-Doubao-Seed-2.1-turbo   纠纷材料视觉核验员，只读原图并返回 vision-evidence/v2
+纠纷材料整理专员       唯一事实合并者、唯一报告生成者、唯一业务写入者
+纠纷材料视觉核验员     只读当前图片附件并返回 vision-evidence/v3
 Feishu Minutes          用户身份远端音频转写，只提供逐字稿及远端回执
 ```
 
@@ -60,7 +60,7 @@ Feishu Minutes          用户身份远端音频转写，只提供逐字稿及�
 
 ## 文档能力
 
-运行环境必须提供：附件读取和媒体渲染、自定义视觉子智能体、用户身份云盘上传、妙记逐字稿、Docx 创建与 revision 覆盖、完整文档读回、协作者添加与列表读回、Base 精确读写。
+运行环境必须提供：附件读取和媒体渲染、Aily 图片附件上传和视觉智能体会话、用户身份云盘上传、妙记逐字稿、Docx 创建与 revision 覆盖、完整文档读回、协作者添加与列表读回、Base 精确读写。
 
 初次处理只创建一份报告。补充处理在覆盖前保存旧报告快照；失败先把 Base 分类为 processing、staged、completed 或 conflict。processing 状态下，文档仍是任务前精确 revision/hash 时直接失败；文档已是本次候选时补做阶段绑定后再失败。staged/completed 均保留已验证报告绑定，只标记失败，禁止回滚业务字段或覆盖人工修改。
 
@@ -68,7 +68,7 @@ Feishu Minutes          用户身份远端音频转写，只提供逐字稿及�
 
 只有以下结果全部真实读回才算完成：
 
-- 材料清单没有 `partial` 或 `failed`，下载 token 集合与运行信封完全一致；
+- 材料清单没有 `partial` 或 `failed`，下载 token 集合与运行信封完全一致，原始回执与下载封印哈希已进入材料清单和处理基线；
 - 全部视觉和音频任务、证据包、语料哈希一致；
 - 本地固定模板以及目标 token 的远端报告均通过校验；
 - 每个上传人均在与目标 docx token 精确绑定的各自协作者列表回执中具有 `full_access`；
@@ -82,6 +82,9 @@ Feishu Minutes          用户身份远端音频转写，只提供逐字稿及�
 ## 必需应用权限
 
 ```text
+aily:agent_attachment:write
+aily:agent_chat:write
+aily:agent_chat:read
 drive:drive
 drive:file:upload
 minutes:minutes.upload:write

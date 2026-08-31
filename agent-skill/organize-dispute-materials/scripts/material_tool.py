@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,6 +20,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 import xml.etree.ElementTree as ET
+
+from evidence_contract import (
+    AUDIO_RESULT_SCHEMA,
+    AUDIO_TASK_SCHEMA,
+    VISION_AGENT_ID,
+    VISION_AGENT_NAME,
+    VISION_TASK_SCHEMA,
+)
 
 
 TEXT_SUFFIXES = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"}
@@ -32,8 +41,10 @@ MAX_ARCHIVE_MEMBER_BYTES = 100 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
 MIN_TEXT_CHARS_PER_PDF_PAGE = 24
 PDF_OCR_DPI = 300
-VISION_TASK_SCHEMA = "vision-task/v1"
-AUDIO_TASK_SCHEMA = "audio-task/v1"
+AILY_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+AILY_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+DOWNLOAD_SEAL_SCHEMA = "attachment-download-seal/v1"
+DOWNLOAD_FIELD_ID = "fldOz2CYX4"
 
 
 class MaterialError(Exception):
@@ -44,6 +55,178 @@ class MaterialError(Exception):
 class OCRResult:
     text: str
     mean_confidence: float | None
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    path: Path
+    sha256: str
+    size: int
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False,
+    ) as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    temporary.replace(path)
+
+
+def snapshot_file(source: Path, directory: Path, prefix: str, suffix: str) -> FileSnapshot:
+    """Copy one stable byte stream into an owned, content-addressed file."""
+
+    directory = directory.resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with source.open("rb") as reader:
+            before = os.fstat(reader.fileno())
+            digest = hashlib.sha256()
+            size = 0
+            with tempfile.NamedTemporaryFile("wb", dir=directory, prefix=f".{prefix}.", delete=False) as writer:
+                temporary = Path(writer.name)
+                for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    writer.write(chunk)
+                writer.flush()
+                os.fsync(writer.fileno())
+            after = os.fstat(reader.fileno())
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if size != before.st_size or any(getattr(before, key) != getattr(after, key) for key in stable_fields):
+            raise MaterialError(f"material changed while creating snapshot: {source.name}")
+        file_hash = digest.hexdigest()
+        destination = directory / f"{prefix}_{file_hash[:24]}{suffix}"
+        if destination.is_file() and destination.stat().st_size == size and sha256_file(destination) == file_hash:
+            temporary.unlink()
+        else:
+            temporary.replace(destination)
+        destination.chmod(0o444)
+        return FileSnapshot(destination, file_hash, size)
+    except Exception:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+@dataclass(frozen=True)
+class VisionImageSnapshot:
+    file: FileSnapshot
+    transform: dict[str, object]
+
+
+def aily_image_snapshot(source: Path, directory: Path) -> VisionImageSnapshot:
+    """Create an Aily-compatible snapshot without avoidable resolution loss."""
+
+    source_suffix = source.suffix.lower()
+    source_size = source.stat().st_size
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        Image = None  # type: ignore[assignment]
+        ImageOps = None  # type: ignore[assignment]
+
+    width: int | None = None
+    height: int | None = None
+    if Image is not None:
+        try:
+            with Image.open(source) as opened:
+                width, height = opened.size
+        except Exception as exc:
+            raise MaterialError(f"cannot decode visual unit: {source.name}") from exc
+    else:
+        try:
+            import fitz  # type: ignore
+            pixmap = fitz.Pixmap(str(source))
+            width, height = pixmap.width, pixmap.height
+        except Exception as exc:
+            raise MaterialError(f"cannot decode visual unit: {source.name}") from exc
+
+    if source_suffix in AILY_IMAGE_SUFFIXES and source_size <= AILY_IMAGE_MAX_BYTES:
+        snapshot = snapshot_file(source, directory, "image", source_suffix)
+        return VisionImageSnapshot(snapshot, {
+            "mode": "passthrough",
+            "source_suffix": source_suffix,
+            "source_size_bytes": source_size,
+            "source_pixel_width": width,
+            "source_pixel_height": height,
+            "output_suffix": source_suffix,
+            "output_pixel_width": width,
+            "output_pixel_height": height,
+            "jpeg_quality": None,
+        })
+
+    temporary: Path | None = None
+    try:
+        if Image is not None and ImageOps is not None:
+            with Image.open(source) as opened:
+                original = ImageOps.exif_transpose(opened).convert("RGB")
+                original_width, original_height = original.size
+                for ratio in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5):
+                    target = (
+                        max(1, round(original_width * ratio)),
+                        max(1, round(original_height * ratio)),
+                    )
+                    rendered = original if ratio == 1.0 else original.resize(target, Image.Resampling.LANCZOS)
+                    for quality in (92, 85, 78, 70, 62):
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".jpg", dir=directory, prefix=".aily-image.", delete=False,
+                        ) as handle:
+                            temporary = Path(handle.name)
+                        rendered.save(temporary, format="JPEG", quality=quality, optimize=True)
+                        if 0 < temporary.stat().st_size <= AILY_IMAGE_MAX_BYTES:
+                            snapshot = snapshot_file(temporary, directory, "image", ".jpg")
+                            return VisionImageSnapshot(snapshot, {
+                                "mode": "transcoded",
+                                "source_suffix": source_suffix,
+                                "source_size_bytes": source_size,
+                                "source_pixel_width": width,
+                                "source_pixel_height": height,
+                                "output_suffix": ".jpg",
+                                "output_pixel_width": target[0],
+                                "output_pixel_height": target[1],
+                                "jpeg_quality": quality,
+                            })
+                        temporary.unlink(missing_ok=True)
+                        temporary = None
+        else:
+            import fitz  # type: ignore
+            pixmap = fitz.Pixmap(str(source))
+            if pixmap.alpha or pixmap.colorspace != fitz.csRGB:
+                pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+            for shrink in range(4):
+                if shrink:
+                    pixmap.shrink(1)
+                for quality in (92, 85, 78, 70, 62):
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".jpg", dir=directory, prefix=".aily-image.", delete=False,
+                    ) as handle:
+                        temporary = Path(handle.name)
+                    pixmap.save(str(temporary), jpg_quality=quality)
+                    if 0 < temporary.stat().st_size <= AILY_IMAGE_MAX_BYTES:
+                        snapshot = snapshot_file(temporary, directory, "image", ".jpg")
+                        return VisionImageSnapshot(snapshot, {
+                            "mode": "transcoded",
+                            "source_suffix": source_suffix,
+                            "source_size_bytes": source_size,
+                            "source_pixel_width": width,
+                            "source_pixel_height": height,
+                            "output_suffix": ".jpg",
+                            "output_pixel_width": pixmap.width,
+                            "output_pixel_height": pixmap.height,
+                            "jpeg_quality": quality,
+                        })
+                    temporary.unlink(missing_ok=True)
+                    temporary = None
+        raise MaterialError(f"image exceeds Aily upload limit after conversion: {source.name}")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class VisionCollector:
@@ -65,13 +248,18 @@ class VisionCollector:
         reason: str,
         ocr: OCRResult,
     ) -> str:
-        image_hash = sha256_file(image)
-        identity = f"{source_file}\0{source_sha256}\0{unit}\0{page or 0}\0{image_hash}"
+        prepared = aily_image_snapshot(image, self.directory)
+        snapshot = prepared.file
+        suffix = snapshot.path.suffix.lower()
+        identity = f"{source_file}\0{source_sha256}\0{unit}\0{page or 0}\0{snapshot.sha256}"
         task_id = "vis_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
-        suffix = image.suffix.lower() if image.suffix.lower() in IMAGE_SUFFIXES else ".png"
         destination = self.directory / f"{task_id}{suffix}"
-        if not destination.exists():
-            shutil.copyfile(image, destination)
+        if snapshot.path != destination:
+            if destination.is_file() and destination.stat().st_size == snapshot.size and sha256_file(destination) == snapshot.sha256:
+                snapshot.path.unlink()
+            else:
+                snapshot.path.replace(destination)
+            destination.chmod(0o444)
         self.tasks.append({
             "schema_version": VISION_TASK_SCHEMA,
             "task_id": task_id,
@@ -80,8 +268,10 @@ class VisionCollector:
             "unit": unit,
             "page": page,
             "reason": reason,
-            "image_path": str(destination),
-            "image_sha256": image_hash,
+            "image_file": destination.name,
+            "image_sha256": snapshot.sha256,
+            "image_size": snapshot.size,
+            "image_transform": prepared.transform,
             "ocr_text": ocr.text,
             "ocr_mean_confidence": ocr.mean_confidence,
         })
@@ -96,16 +286,15 @@ class VisionCollector:
         manifest = {
             "schema_version": VISION_TASK_SCHEMA,
             "policy": {
-                "worker": "纠纷材料视觉核验员",
-                "required_model": "Doubao-Seed-2.1-turbo",
+                "worker": VISION_AGENT_NAME,
+                "agent_id": VISION_AGENT_ID,
                 "write_scope": "read_only_evidence",
                 "all_visual_units_required": True,
             },
             "tasks": tasks,
             "summary": {"total": len(tasks), "pending": len(tasks)},
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write(path, json.dumps(manifest, ensure_ascii=False, indent=2))
         return manifest
 
 
@@ -125,22 +314,29 @@ class AudioCollector:
         self.tasks: list[dict[str, object]] = []
 
     def add(self, media: Path, *, source_file: str, source_sha256: str) -> str:
-        media_hash = sha256_file(media)
         suffix = material_suffix(media)
-        identity = f"{source_file}\0{source_sha256}\0{media_hash}\0{media.stat().st_size}"
+        snapshot = snapshot_file(media, self.directory, "audio", suffix)
+        if snapshot.sha256 != source_sha256:
+            snapshot.path.unlink(missing_ok=True)
+            raise MaterialError(f"audio source changed before snapshot: {source_file}")
+        identity = f"{source_file}\0{source_sha256}\0{snapshot.sha256}\0{snapshot.size}"
         task_id = "aud_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
         destination = self.directory / f"{task_id}{suffix}"
-        if not destination.exists():
-            shutil.copyfile(media, destination)
+        if snapshot.path != destination:
+            if destination.is_file() and destination.stat().st_size == snapshot.size and sha256_file(destination) == snapshot.sha256:
+                snapshot.path.unlink()
+            else:
+                snapshot.path.replace(destination)
+            destination.chmod(0o444)
         self.tasks.append({
             "schema_version": AUDIO_TASK_SCHEMA,
             "task_id": task_id,
             "source_file": source_file,
             "source_sha256": source_sha256,
-            "media_path": str(destination),
-            "media_sha256": media_hash,
+            "media_file": destination.name,
+            "media_sha256": snapshot.sha256,
             "media_suffix": suffix,
-            "size_bytes": media.stat().st_size,
+            "size_bytes": snapshot.size,
         })
         return task_id
 
@@ -155,15 +351,14 @@ class AudioCollector:
             "policy": {
                 "transcriber": "Feishu Minutes",
                 "identity": "user",
-                "result_schema": "audio-evidence/v1",
+                "result_schema": AUDIO_RESULT_SCHEMA,
                 "write_scope": "transcript_only",
                 "all_audio_units_required": True,
             },
             "tasks": tasks,
             "summary": {"total": len(tasks), "pending": len(tasks)},
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write(path, json.dumps(manifest, ensure_ascii=False, indent=2))
         return manifest
 
 
@@ -385,7 +580,7 @@ def extract_pdf(
             text = page.get_text("text").strip()
             has_native_text = normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE
             page_image = has_page_image(page)
-            if has_native_text and not page_image:
+            if has_native_text and not page_image and collector is None:
                 methods.add("pdf_text")
             else:
                 temporary_name = ""
@@ -411,7 +606,7 @@ def extract_pdf(
                             source_sha256=source_sha256 or sha256_file(path),
                             unit=f"page:{page_index + 1}",
                             page=page_index + 1,
-                            reason="pdf_page_visual_content" if page_image else "pdf_page_without_text_layer",
+                            reason="pdf_page_visual_verification",
                             ocr=ocr,
                         )
                     methods.add("vision_required")
@@ -454,9 +649,10 @@ def extract_pdf_cli(
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=90, check=False,
         )
         text = converted.stdout.strip() if converted.returncode == 0 else ""
-        if normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE:
+        has_native_text = normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE
+        if has_native_text:
             methods.add("pdf_text")
-        elif pdftoppm:
+        if collector is not None and pdftoppm:
             with tempfile.TemporaryDirectory(prefix="odm-pdf-page-") as directory:
                 prefix = Path(directory) / "page"
                 rendered = subprocess.run(
@@ -482,13 +678,13 @@ def extract_pdf_cli(
                             source_sha256=source_sha256 or sha256_file(path),
                             unit=f"page:{page_number}",
                             page=page_number,
-                            reason="pdf_page_without_text_layer",
+                            reason="pdf_page_visual_verification",
                             ocr=ocr,
                         )
                     methods.add("vision_required")
                 except MaterialError as exc:
                     failures.append(f"page:{page_number}:{type(exc).__name__}")
-        else:
+        elif collector is not None:
             failures.append(f"page:{page_number}:OCRUnavailable")
         pages.append(f"[第{page_number}页]\n{text}" if text else f"[第{page_number}页]")
     return "\n\n".join(pages), page_count, sorted(methods), failures
@@ -725,8 +921,8 @@ def write_outputs(
             "text_chars": sum(item.text_chars for item in results),
         },
     }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    corpus_path.write_text(corpus, encoding="utf-8")
+    atomic_write(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
+    atomic_write(corpus_path, corpus)
     return manifest
 
 
@@ -740,9 +936,7 @@ def read_object(path: Path, label: str) -> dict[str, object]:
     return value
 
 
-def verified_downloads(runtime_path: Path, receipt_path: Path, input_dir: Path) -> dict[Path, str]:
-    """Bind every local input file to the exact Base attachment token."""
-
+def runtime_attachment_scope(runtime_path: Path) -> tuple[str, list[str]]:
     runtime = read_object(runtime_path, "runtime")
     record_id = str(runtime.get("record_id") or "").strip()
     expected = runtime.get("attachment_ids")
@@ -751,45 +945,143 @@ def verified_downloads(runtime_path: Path, receipt_path: Path, input_dir: Path) 
     expected_ids = sorted({str(item).strip() for item in expected if str(item).strip()})
     if len(expected_ids) != len(expected) or not expected_ids:
         raise MaterialError("runtime attachment_ids must be unique and non-empty")
+    return record_id, expected_ids
 
+
+def download_items(receipt_path: Path) -> list[dict[str, object]]:
     receipt = read_object(receipt_path, "attachment download receipt")
     data = receipt.get("data")
     downloaded = data.get("downloaded") if isinstance(data, dict) else None
     if receipt.get("ok") is not True or receipt.get("identity") != "user" or not isinstance(downloaded, list):
         raise MaterialError("attachment download receipt is not a successful user readback")
-    root = input_dir.resolve(strict=True)
-    mapping: dict[Path, str] = {}
-    received_ids: list[str] = []
-    for item in downloaded:
-        if not isinstance(item, dict):
-            raise MaterialError("attachment download item is not an object")
-        token = str(item.get("file_token") or "").strip()
+    if not all(isinstance(item, dict) for item in downloaded):
+        raise MaterialError("attachment download item is not an object")
+    return downloaded  # type: ignore[return-value]
+
+
+def normalized_download_item(item: dict[str, object], record_id: str, root: Path) -> dict[str, object]:
+    token = str(item.get("file_token") or "").strip()
+    try:
         saved = Path(str(item.get("saved_path") or "")).resolve(strict=True)
-        try:
-            saved.relative_to(root)
-        except ValueError as exc:
-            raise MaterialError("downloaded attachment escaped the job input directory") from exc
-        if str(item.get("record_id") or "") != record_id or str(item.get("field_id") or "") != "fldOz2CYX4":
-            raise MaterialError("downloaded attachment is not bound to the target record field")
-        try:
-            receipt_size = int(item.get("size_bytes") or -1)
-        except (TypeError, ValueError) as exc:
-            raise MaterialError("downloaded attachment size is invalid") from exc
-        if not saved.is_file() or receipt_size != saved.stat().st_size:
+    except OSError as exc:
+        raise MaterialError("downloaded attachment path is invalid") from exc
+    try:
+        saved.relative_to(root)
+    except ValueError as exc:
+        raise MaterialError("downloaded attachment escaped the job input directory") from exc
+    if str(item.get("record_id") or "") != record_id or str(item.get("field_id") or "") != DOWNLOAD_FIELD_ID:
+        raise MaterialError("downloaded attachment is not bound to the target record field")
+    try:
+        size = int(item.get("size_bytes") or -1)
+    except (TypeError, ValueError) as exc:
+        raise MaterialError("downloaded attachment size is invalid") from exc
+    if not token or not saved.is_file() or size < 0:
+        raise MaterialError("downloaded attachment token, path or size is invalid")
+    return {
+        "file_token": token,
+        "saved_path": str(saved),
+        "record_id": record_id,
+        "field_id": DOWNLOAD_FIELD_ID,
+        "size_bytes": size,
+    }
+
+
+def seal_download(
+    runtime_path: Path, receipt_path: Path, input_dir: Path, output_path: Path,
+) -> dict[str, object]:
+    """Seal downloader output to stable file hashes before extraction."""
+
+    record_id, expected_ids = runtime_attachment_scope(runtime_path)
+    root = input_dir.resolve(strict=True)
+    if not root.is_dir():
+        raise MaterialError("input directory is not a directory")
+    items = [normalized_download_item(item, record_id, root) for item in download_items(receipt_path)]
+    sealed: list[dict[str, object]] = []
+    with tempfile.TemporaryDirectory(prefix="odm-download-seal-") as directory:
+        for item in items:
+            saved = Path(str(item["saved_path"]))
+            snapshot = snapshot_file(saved, Path(directory), "download", material_suffix(saved) or ".bin")
+            if item["size_bytes"] != snapshot.size:
+                raise MaterialError("downloaded attachment size/readback mismatch")
+            sealed.append({**item, "sha256": snapshot.sha256})
+    actual_files = {path.resolve() for path in iter_material_files(root)}
+    sealed_files = {Path(str(item["saved_path"])) for item in sealed}
+    sealed_ids = sorted(str(item["file_token"]) for item in sealed)
+    if sealed_ids != expected_ids or sealed_files != actual_files or len(sealed_files) != len(sealed):
+        raise MaterialError("downloaded attachment tokens or files do not match the runtime envelope")
+    seal = {
+        "schema_version": DOWNLOAD_SEAL_SCHEMA,
+        "source_receipt_sha256": sha256_file(receipt_path),
+        "record_id": record_id,
+        "field_id": DOWNLOAD_FIELD_ID,
+        "attachments": sorted(sealed, key=lambda item: str(item["saved_path"]).casefold()),
+    }
+    atomic_write(output_path, json.dumps(seal, ensure_ascii=False, indent=2))
+    return {"status": "sealed", "attachments": len(sealed), "output": str(output_path.resolve())}
+
+
+def verified_download_snapshots(
+    runtime_path: Path, receipt_path: Path, seal_path: Path, input_dir: Path, snapshot_dir: Path,
+) -> list[tuple[str, str, FileSnapshot]]:
+    """Bind every Base attachment token to one stable local byte snapshot."""
+
+    record_id, expected_ids = runtime_attachment_scope(runtime_path)
+    raw_items = download_items(receipt_path)
+    seal = read_object(seal_path, "attachment download seal")
+    attachments = seal.get("attachments")
+    if (
+        set(seal) != {"schema_version", "source_receipt_sha256", "record_id", "field_id", "attachments"}
+        or seal.get("schema_version") != DOWNLOAD_SEAL_SCHEMA
+        or seal.get("source_receipt_sha256") != sha256_file(receipt_path)
+        or seal.get("record_id") != record_id
+        or seal.get("field_id") != DOWNLOAD_FIELD_ID
+        or not isinstance(attachments, list)
+        or not all(isinstance(item, dict) for item in attachments)
+    ):
+        raise MaterialError("attachment download seal is invalid")
+
+    root = input_dir.resolve(strict=True)
+    raw_normalized = [normalized_download_item(item, record_id, root) for item in raw_items]
+    raw_map = {str(item["file_token"]): item for item in raw_normalized}
+    mapping: dict[Path, tuple[str, FileSnapshot]] = {}
+    received_ids: list[str] = []
+    for item in attachments:
+        if set(item) != {"file_token", "saved_path", "record_id", "field_id", "size_bytes", "sha256"}:
+            raise MaterialError("attachment download seal item fields are invalid")
+        token = str(item.get("file_token") or "").strip()
+        normalized = normalized_download_item(item, record_id, root)
+        if raw_map.get(token) != normalized:
+            raise MaterialError("attachment download seal does not match the downloader readback")
+        saved = Path(str(normalized["saved_path"]))
+        snapshot = snapshot_file(
+            saved, snapshot_dir, "source", material_suffix(saved) or ".bin",
+        )
+        if normalized["size_bytes"] != snapshot.size:
             raise MaterialError("downloaded attachment size/readback mismatch")
+        receipt_hash = str(item.get("sha256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", receipt_hash) or receipt_hash != snapshot.sha256:
+            raise MaterialError("downloaded attachment hash/readback mismatch")
         if saved in mapping:
             raise MaterialError("duplicate downloaded attachment path")
-        mapping[saved] = token
+        mapping[saved] = (token, snapshot)
         received_ids.append(token)
     actual_files = {path.resolve() for path in iter_material_files(root)}
     if sorted(received_ids) != expected_ids or set(mapping) != actual_files:
         raise MaterialError("downloaded attachment tokens or files do not match the runtime envelope")
-    return mapping
+    return [
+        (path.name, mapping[path][0], mapping[path][1])
+        for path in sorted(mapping, key=lambda item: item.name.casefold())
+    ]
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Extract all downloaded dispute materials.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    seal = subparsers.add_parser("seal-download")
+    seal.add_argument("--runtime", type=Path, required=True)
+    seal.add_argument("--download-receipt", type=Path, required=True)
+    seal.add_argument("--input-dir", type=Path, required=True)
+    seal.add_argument("--output", type=Path, required=True)
     extract = subparsers.add_parser("extract")
     extract.add_argument("--input-dir", type=Path, required=True)
     extract.add_argument("--output-dir", type=Path, required=True)
@@ -801,30 +1093,46 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--audio-tasks", type=Path, required=True)
     extract.add_argument("--runtime", type=Path, required=True)
     extract.add_argument("--download-receipt", type=Path, required=True)
+    extract.add_argument("--download-seal", type=Path, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "seal-download":
+            print(json.dumps(seal_download(
+                args.runtime, args.download_receipt, args.input_dir, args.output,
+            ), ensure_ascii=False, separators=(",", ":")))
+            return 0
         source = args.input_dir.resolve(strict=True)
         if not source.is_dir():
             raise MaterialError("input directory is not a directory")
         collector = VisionCollector(args.vision_dir)
         audio_collector = AudioCollector(args.audio_dir)
-        downloads = verified_downloads(args.runtime, args.download_receipt, source)
-        results = [
-            extract_material(
-                path, attachment_id=downloads[path.resolve()],
-                collector=collector, audio_collector=audio_collector,
+        with tempfile.TemporaryDirectory(prefix="odm-material-snapshot-") as snapshot_directory:
+            snapshot_root = Path(snapshot_directory)
+            snapshots = verified_download_snapshots(
+                args.runtime, args.download_receipt, args.download_seal, source, snapshot_root,
             )
-            for path in iter_material_files(source)
-        ]
+            results = [
+                extract_material(
+                    snapshot.path,
+                    attachment_id=attachment_id,
+                    display_name=file_name,
+                    collector=collector,
+                    audio_collector=audio_collector,
+                )
+                for file_name, attachment_id, snapshot in snapshots
+            ]
         if not results:
             raise MaterialError("no attachment files found")
         vision = collector.write(args.vision_tasks)
         audio = audio_collector.write(args.audio_tasks)
         manifest = write_outputs(results, args.output_dir, args.manifest, args.corpus, vision, audio)
+        manifest["artifacts"]["download_receipt_sha256"] = sha256_file(args.download_receipt)
+        manifest["artifacts"]["download_seal_sha256"] = sha256_file(args.download_seal)
+        atomic_write(args.manifest, json.dumps(manifest, ensure_ascii=False, indent=2))
         output = dict(manifest["summary"])
         output["vision_tasks"] = vision["summary"]["total"]
         output["audio_tasks"] = audio["summary"]["total"]

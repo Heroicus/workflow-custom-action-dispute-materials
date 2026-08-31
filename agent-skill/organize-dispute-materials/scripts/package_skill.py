@@ -29,6 +29,7 @@ PACKAGE_MEMBERS = (
     "references/vision-contract.md",
     "references/vision-result-schema.json",
     "scripts/audio_tool.py",
+    "scripts/evidence_contract.py",
     "scripts/material_tool.py",
     "scripts/report_tool.py",
     "scripts/vision_tool.py",
@@ -43,8 +44,8 @@ class PackageFailure(Exception):
 class PackageFile:
     """One archive member and its digest."""
 
-    source: Path
     member: str
+    content: bytes
     sha256: str
     size: int
 
@@ -97,7 +98,10 @@ def collect_files(root: Path) -> list[PackageFile]:
             raise PackageFailure(f"symbolic link file is forbidden: {relative}")
         if not path.is_file():
             raise PackageFailure(f"required package file is missing: {relative}")
-        collected.append(PackageFile(path, relative.as_posix(), sha256_file(path), path.stat().st_size))
+        content = path.read_bytes()
+        collected.append(PackageFile(
+            relative.as_posix(), content, hashlib.sha256(content).hexdigest(), len(content),
+        ))
     return collected
 
 
@@ -141,7 +145,7 @@ def write_package(files: list[PackageFile], output: Path) -> dict[str, object]:
             info.date_time = (1980, 1, 1, 0, 0, 0)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
-            archive.writestr(info, item.source.read_bytes())
+            archive.writestr(info, item.content)
     temporary.replace(output)
     return {
         "output": str(output),

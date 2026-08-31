@@ -1,6 +1,6 @@
 export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.7";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.7.2";
+export const REQUIRED_SKILL_VERSION = "6.7.3";
 
 const REPORT_DOCX_ORIGIN = "https://aixuexi.feishu.cn";
 const REPORT_DOCX_PATTERN = /https:\/\/aixuexi\.feishu\.cn\/docx\/([A-Za-z0-9_-]{8,128})(?=$|[\s)\]}>,'"?&#])/g;
@@ -81,13 +81,14 @@ export function resolveReportDocxReference(
 export const PRODUCTION_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh";
 export const PRODUCTION_TABLE_ID = "tbllz7nrxSIH8frX";
 export const BASELINE_FIELD_NAME = "材料处理基线";
-export const MODEL_CONTRACT = {
-  main_model: "Deepseek-V4-Pro",
+export const AGENT_CONTRACT = {
+  main_agent_name: "纠纷材料整理专员",
   vision_agent_name: "纠纷材料视觉核验员",
-  vision_model: "Doubao-Seed-2.1-turbo",
-  vision_result_schema: "vision-evidence/v2",
+  vision_agent_id: "agent_4kvjymmm4hewmu4",
+  vision_result_schema: "vision-evidence/v3",
+  vision_transport: "aily_attachment_chat",
   audio_transcription_service: "Feishu Minutes",
-  audio_result_schema: "audio-evidence/v1",
+  audio_result_schema: "audio-evidence/v2",
   write_policy: "main_agent_only",
 } as const;
 
@@ -153,7 +154,7 @@ export function buildAnalysisPrompt(input: AnalysisPromptInput): string {
     existing_report_url: input.existingReportUrl || "",
     component_build: requiredText(input.componentBuild, "componentBuild"),
     required_skill_version: REQUIRED_SKILL_VERSION,
-    model_contract: MODEL_CONTRACT,
+    agent_contract: AGENT_CONTRACT,
     baseline_field_name: BASELINE_FIELD_NAME,
     field_contract: PRODUCTION_FIELD_CONTRACT,
   });

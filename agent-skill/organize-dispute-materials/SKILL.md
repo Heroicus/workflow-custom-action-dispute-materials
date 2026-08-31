@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并经远端读回后两阶段回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.7.2"
+  version: "6.7.3"
   tier: STANDARD
   category: legal-automation
 ---
@@ -16,11 +16,11 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.7.2
-component_build = 6.7.2-skill-6.7.2
+required_skill_version = 6.7.3
+component_build = 6.7.3-skill-6.7.3
 mode = initial | supplement
-main_model = Deepseek-V4-Pro
-vision_agent = 纠纷材料视觉核验员 / Doubao-Seed-2.1-turbo / 只读
+main_agent = 纠纷材料整理专员
+vision_agent = 纠纷材料视觉核验员 / 只读
 音频 = Feishu Minutes / 用户身份 / 远端逐字稿读回
 唯一业务写入者 = 主智能体
 ```
@@ -35,7 +35,8 @@ vision_agent = 纠纷材料视觉核验员 / Doubao-Seed-2.1-turbo / 只读
 umask 077
 mkdir "$job_dir" && cd "$job_dir"
 mkdir -p materials extracted/text extracted/vision-pages extracted/vision-results \
-  extracted/audio-files extracted/audio-receipts extracted/audio-transcripts permissions
+  extracted/vision-receipts extracted/audio-files extracted/audio-receipts \
+  extracted/audio-transcripts permissions
 ```
 
 ## 1. 读取同一记录并下载全部附件
@@ -53,9 +54,16 @@ lark-cli base +record-download-attachment --as user \
   --record-id "$record_id" --output materials --overwrite \
   --format json > attachment-download.json
 
+python3 "$SKILL_ROOT/scripts/material_tool.py" seal-download \
+  --runtime runtime.json \
+  --download-receipt attachment-download.json \
+  --input-dir materials \
+  --output attachment-download-seal.json
+
 python3 "$SKILL_ROOT/scripts/material_tool.py" extract \
   --runtime runtime.json \
   --download-receipt attachment-download.json \
+  --download-seal attachment-download-seal.json \
   --input-dir materials \
   --output-dir extracted/text \
   --manifest extracted/material-manifest.json \
@@ -66,22 +74,24 @@ python3 "$SKILL_ROOT/scripts/material_tool.py" extract \
   --audio-tasks extracted/audio-tasks.json
 ```
 
-提取器必须验证下载回执是用户身份、目标 `record_id`、案件文档字段 `fldOz2CYX4`，并且附件 token、文件路径和字节数与运行信封完全一致。初次和补充处理都重读全部当前附件。OCR 只作为视觉子智能体提示，不能直接进入事实语料；任何 `partial` 或 `failed` 材料都会阻断完成。
+下载完成后先生成下载封印。封印将原始回执哈希、用户身份、目标 `record_id`、案件文档字段 `fldOz2CYX4`、附件 token、文件路径、字节数和本地快照 SHA-256 绑定。提取器再次读取原文件，必须与封印完全一致。初次和补充处理都重读全部当前附件。OCR 只作为视觉子智能体提示，不能直接进入事实语料；任何 `partial` 或 `failed` 材料都会阻断完成。
 
 ## 2. 视觉逐字核验
 
-逐项读取 `extracted/vision-tasks.json`：
-
-1. 调用已经可路由的 `纠纷材料视觉核验员`；
-2. 同时传入任务 JSON 和 `image_path` 原图，不能只传 OCR；
-3. 子智能体固定为 Doubao-Seed-2.1-turbo，只返回 `vision-evidence/v2`；
-4. 子智能体只逐字转录、标注不确定区域，不规范化日期、金额、姓名，不生成报告，不读写飞书；
-5. 去掉 Markdown 代码围栏后，将原始 JSON 保存为 `extracted/vision-results/<task_id>.json`，不得补字段或改写；不合约只重试一次。
+视觉任务由程序按清单生成，使用最多四个受限工作线并设置小于小组件租约的全局时限。`vision_tool.py collect` 为每项任务上传一张图片附件，以用户身份创建一次 `纠纷材料视觉核验员` 会话并读回结果。主智能体不得自行调用子智能体，不得组合多项任务，不得把本地路径当作图片输入，也不得改写子智能体返回值。每项远端附件、会话和最终读回均保存原始响应及 SHA-256。
 
 ```bash
+python3 "$SKILL_ROOT/scripts/vision_tool.py" collect \
+  --tasks extracted/vision-tasks.json \
+  --image-root extracted/vision-pages \
+  --results-dir extracted/vision-results \
+  --receipts-dir extracted/vision-receipts
+
 python3 "$SKILL_ROOT/scripts/vision_tool.py" reconcile \
   --tasks extracted/vision-tasks.json \
+  --image-root extracted/vision-pages \
   --results-dir extracted/vision-results \
+  --receipts-dir extracted/vision-receipts \
   --source-corpus extracted/source-corpus.txt \
   --output-corpus extracted/vision-source-corpus.txt \
   --evidence extracted/vision-evidence.json
@@ -96,11 +106,13 @@ python3 "$SKILL_ROOT/scripts/vision_tool.py" reconcile \
 ```bash
 python3 "$SKILL_ROOT/scripts/audio_tool.py" transcribe \
   --tasks extracted/audio-tasks.json \
+  --media-root extracted/audio-files \
   --receipts-dir extracted/audio-receipts \
   --transcripts-dir extracted/audio-transcripts
 
 python3 "$SKILL_ROOT/scripts/audio_tool.py" reconcile \
   --tasks extracted/audio-tasks.json \
+  --media-root extracted/audio-files \
   --receipts-dir extracted/audio-receipts \
   --transcripts-dir extracted/audio-transcripts \
   --source-corpus extracted/vision-source-corpus.txt \
@@ -128,7 +140,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" scaffold \
 - `evidence_rows` 只列正式证据；程序文书、裁判文书、庭审笔录、内部工作清单不得冒充证据；`completeness_rows` 覆盖全部材料；
 - 金额只来自当前请求；分段计算有金额时，期间、基数、日利率和天数必须同时有材料支持；
 - 身份证号、手机号、银行卡号必须脱敏；正文不得出现模型、工具、文件路径、任务 schema、解析方法、调用参数或运行日志；
-- `quality_rows` 已由脚手架按材料清单确定性生成，禁止模型改写；
+- `quality_rows` 已由脚手架按材料清单确定性生成，禁止纠纷材料整理专员改写；
 - `base_fields.case_name` 必须是材料原文支持的正式案件名称，且在双方主体已知时同时包含双方名称；`filing_date` 必须与 `scalars.filing_date` 同日，类型和状态必须与报告标量一致。案件名称和立案日期同样必须在 `source_refs` 中绑定材料 SHA-256 与逐字引文；不得按字符串公式拼接或自由发挥。
 - 对每个非空且不是“未载明/不适用/待核”的实质事实，在顶层 `source_refs` 中以完整字段路径登记一个或多个 `{"source_sha256":"…","quote":"材料原文逐字引文"}`；引文必须出现在该哈希对应的语料分段，事实值也必须由这些指定来源共同支持。来源引用只用于校验，不渲染进报告。
 
@@ -140,6 +152,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate-facts \
   --manifest extracted/material-manifest.json \
   --vision-evidence extracted/vision-evidence.json \
   --vision-tasks extracted/vision-tasks.json \
+  --vision-receipts-dir extracted/vision-receipts \
   --audio-evidence extracted/audio-evidence.json \
   --audio-tasks extracted/audio-tasks.json \
   --audio-receipts-dir extracted/audio-receipts \
@@ -214,7 +227,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" validate \
 
 ```text
 处理中 → 结果已写入，待最终校验 → 已完成
-                                  ↘ 分析失败（保留已验证报告绑定）
+                                  ↘ 分析失败，保留已验证报告绑定
 ```
 
 任何响应超时或读回失败都先读取 Base、报告和权限并分类；禁止“任一失败先回滚”。
@@ -232,6 +245,7 @@ python3 "$SKILL_ROOT/scripts/report_tool.py" build-writeback \
   --manifest extracted/material-manifest.json \
   --vision-evidence extracted/vision-evidence.json \
   --vision-tasks extracted/vision-tasks.json \
+  --vision-receipts-dir extracted/vision-receipts \
   --audio-evidence extracted/audio-evidence.json \
   --audio-tasks extracted/audio-tasks.json \
   --audio-receipts-dir extracted/audio-receipts \
