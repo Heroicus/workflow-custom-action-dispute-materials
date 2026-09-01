@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并经远端读回后两阶段回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.7.4"
+  version: "6.8.1"
   tier: STANDARD
   category: legal-automation
 ---
@@ -16,8 +16,8 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.7.4
-component_build = 6.7.4-skill-6.7.4
+required_skill_version = 6.8.1
+component_build = 6.8.1-skill-6.8.1
 mode = initial | supplement
 main_agent = 纠纷材料整理专员
 vision_agent = 纠纷材料视觉核验员 / 只读
@@ -35,7 +35,7 @@ vision_agent = 纠纷材料视觉核验员 / 只读
 umask 077
 mkdir "$job_dir" && cd "$job_dir"
 mkdir -p materials extracted/text extracted/vision-pages extracted/vision-results \
-  extracted/vision-receipts extracted/audio-files extracted/audio-receipts \
+  extracted/vision-responses extracted/vision-receipts extracted/audio-files extracted/audio-receipts \
   extracted/audio-transcripts permissions
 ```
 
@@ -78,14 +78,35 @@ python3 "$SKILL_ROOT/scripts/material_tool.py" extract \
 
 ## 2. 视觉逐字核验
 
-视觉任务由程序按清单生成，使用最多四个受限工作线并设置小于小组件租约的全局时限。`vision_tool.py collect` 将每项任务绑定到附件下载封印中的唯一 Base 附件，以用户身份创建一次 `纠纷材料视觉核验员` 文本会话。视觉智能体只读同一记录并重新下载指定附件，再打开指定视觉单元逐字核验。主智能体不得自行调用子智能体，不得组合多项任务，不得把本地路径当作图片输入，也不得改写子智能体返回值。每项 Base 来源绑定、会话和最终读回均保存原始响应及 SHA-256。
+视觉任务由程序按清单生成。`vision_tool.py prepare` 将每项任务绑定到附件下载封印中的唯一 Base 附件，并生成不可改写的调用清单。纠纷材料整理专员逐项使用平台原生智能体调用能力调用 `纠纷材料视觉核验员`。不得用 Bash、lark-cli 或 Aily OpenAPI 创建嵌套会话。每次调用只传入调用清单中的一条 `prompt`，并将子智能体返回的唯一 JSON 原样写入该项 `response_file`。格式错误或状态不完整时重新调用同名智能体，最多三次。不得把主智能体本地路径传给子智能体，不得用 OCR 文字代替真实附件读取，不得自行生成或改写视觉结果。
 
 ```bash
-python3 "$SKILL_ROOT/scripts/vision_tool.py" collect \
+python3 "$SKILL_ROOT/scripts/vision_tool.py" prepare \
   --runtime runtime.json \
   --download-seal attachment-download-seal.json \
   --tasks extracted/vision-tasks.json \
   --image-root extracted/vision-pages \
+  --output extracted/vision-invocations.json
+```
+
+读取 `extracted/vision-invocations.json`。对 `invocations` 中每一项执行以下步骤：
+
+1. 使用平台原生智能体调用能力调用 `agent_name` 指定的 `纠纷材料视觉核验员`。
+2. 输入必须与该项 `prompt` 完全一致。
+3. 返回值必须是唯一 `vision-evidence/v3` JSON。
+4. 将返回 JSON 原样保存到 `extracted/vision-responses/<response_file>`。
+5. 任一项三次仍不合格时以 `VISION_NATIVE_AGENT_FAILED` 结束，不得进入报告生成。
+
+全部响应就绪后执行：
+
+```bash
+python3 "$SKILL_ROOT/scripts/vision_tool.py" accept \
+  --runtime runtime.json \
+  --download-seal attachment-download-seal.json \
+  --tasks extracted/vision-tasks.json \
+  --image-root extracted/vision-pages \
+  --invocations extracted/vision-invocations.json \
+  --responses-dir extracted/vision-responses \
   --results-dir extracted/vision-results \
   --receipts-dir extracted/vision-receipts
 

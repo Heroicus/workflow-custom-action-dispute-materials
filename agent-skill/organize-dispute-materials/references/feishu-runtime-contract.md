@@ -16,7 +16,8 @@ record_id = 运行信封中的 record_id
 ```text
 用户身份读取同一记录并校验 dispatch 所有权
 → 下载全部附件，生成下载封印，绑定原始回执哈希、record_id、字段 ID、附件 token、路径、字节数和 SHA-256
-→ OCR 只提供定位提示，纠纷材料视觉核验员通过记录范围文本会话重新下载唯一附件并返回只读逐字证据
+→ OCR 只提供定位提示，纠纷材料整理专员通过平台原生智能体调用能力逐项调用纠纷材料视觉核验员
+→ 纠纷材料视觉核验员重新下载唯一附件并返回只读逐字证据
 → Feishu Minutes 上传音频并远端读回逐字稿
 → 纠纷材料整理专员从统一核验语料唯一生成事实
 → report_tool.py 使用固定 XML 模板渲染并本地校验
@@ -60,7 +61,7 @@ Feishu Minutes          用户身份远端音频转写，只提供逐字稿及�
 
 ## 文档能力
 
-运行环境必须提供：Base 附件读取和媒体渲染、视觉智能体文本会话、用户身份云盘上传、妙记逐字稿、Docx 创建与 revision 覆盖、完整文档读回、协作者添加与列表读回、Base 精确读写。
+运行环境必须提供：Base 附件读取和媒体渲染、平台原生智能体调用、用户身份云盘上传、妙记逐字稿、Docx 创建与 revision 覆盖、完整文档读回、协作者添加与列表读回、Base 精确读写。
 
 初次处理只创建一份报告。补充处理在覆盖前保存旧报告快照；失败先把 Base 分类为 processing、staged、completed 或 conflict。processing 状态下，文档仍是任务前精确 revision/hash 时直接失败；文档已是本次候选时补做阶段绑定后再失败。staged/completed 均保留已验证报告绑定，只标记失败，禁止回滚业务字段或覆盖人工修改。
 
@@ -82,8 +83,6 @@ Feishu Minutes          用户身份远端音频转写，只提供逐字稿及�
 ## 必需应用权限
 
 ```text
-aily:agent_chat:write
-aily:agent_chat:read
 base:record:read
 docs:document.media:download
 drive:drive

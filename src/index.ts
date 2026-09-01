@@ -17,7 +17,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.7.4-skill-6.7.4";
+const BUILD_ID = "6.8.1-skill-6.8.1";
 const REQUEST_TIMEOUT_MS = 10_000;
 const PROCESSING_LEASE_MS = 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -368,7 +368,7 @@ function isTitleBoundLegacyBaseline(version: string): boolean {
 }
 
 function isStrongLegacyBaseline(version: string): boolean {
-  return version === "6.7.0" || version === "6.7.1";
+  return ["6.7.0", "6.7.1", "6.7.2", "6.7.3", "6.7.4"].includes(version);
 }
 
 function isSupportedLegacyBaseline(version: string): boolean {

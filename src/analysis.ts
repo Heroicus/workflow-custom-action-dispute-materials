@@ -1,6 +1,6 @@
 export const DISPATCH_CONTRACT_TYPE = "dispute-material-run/v6.7";
 export const DISPATCH_OPERATION = "process_target_record";
-export const REQUIRED_SKILL_VERSION = "6.7.4";
+export const REQUIRED_SKILL_VERSION = "6.8.1";
 
 const REPORT_DOCX_ORIGIN = "https://aixuexi.feishu.cn";
 const REPORT_DOCX_PATTERN = /https:\/\/aixuexi\.feishu\.cn\/docx\/([A-Za-z0-9_-]{8,128})(?=$|[\s)\]}>,'"?&#])/g;
@@ -86,7 +86,7 @@ export const AGENT_CONTRACT = {
   vision_agent_name: "纠纷材料视觉核验员",
   vision_agent_id: "agent_4kvjymmm4hewmu4",
   vision_result_schema: "vision-evidence/v3",
-  vision_transport: "base_record_chat",
+  vision_transport: "native_agent_tool",
   audio_transcription_service: "Feishu Minutes",
   audio_result_schema: "audio-evidence/v2",
   write_policy: "main_agent_only",
