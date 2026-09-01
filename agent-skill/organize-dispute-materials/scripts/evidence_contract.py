@@ -30,25 +30,34 @@ def vision_result_skeleton(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def vision_agent_prompt(task: dict[str, Any], source: dict[str, Any]) -> str:
+    task_identity = {
+        "schema_version": task["schema_version"],
+        "task_id": task["task_id"],
+        "source_file": task["source_file"],
+        "source_sha256": task["source_sha256"],
+        "unit": task["unit"],
+        "page": task["page"],
+        "image_sha256": task["image_sha256"],
+    }
+    source_identity = {
+        "schema_version": source["schema_version"],
+        "record_id": source["record_id"],
+        "attachment_field_name": source["attachment_field_name"],
+        "attachment_id": source["attachment_id"],
+        "attachment_name": source["attachment_name"],
+        "attachment_sha256": source["attachment_sha256"],
+        "source_locator": source["source_locator"],
+    }
     return "\n".join([
-        "你是纠纷材料视觉核验员。只处理当前消息给出的唯一 Base 记录、唯一附件和唯一视觉单元。",
-        "使用飞书用户身份读取指定记录，并只下载 source.attachment_id 指定的附件。不得读取其他记录或附件。",
-        "下载后核对附件字节数和 SHA-256。使用文件读取能力打开真实附件，只核验 task.source_file 与 task.unit 指定的页面、图片或嵌入对象。",
-        "直接使用视觉能力读取文件。不得安装、运行或调用本地 OCR 库、OCR 命令或 Python 图像识别脚本。",
-        "不得写入 Base、云文档、云盘、权限或任何业务状态。不得调用纠纷材料整理专员。不得引用历史会话。",
-        "逐字转录可见内容。不总结，不推断，不补全，不规范化。",
-        "ocr_text 只用于定位，不是事实来源。",
-        "来源：" + json.dumps(source, ensure_ascii=False, separators=(",", ":")),
-        "任务：" + json.dumps(task, ensure_ascii=False, separators=(",", ":")),
+        "你是纠纷材料视觉核验员。当前消息只包含一个真实图片附件，它就是本次唯一视觉单元。",
+        "直接读取当前消息附件。不得重新读取 Base，不得下载其他文件，不得调用任何工具或其他智能体。",
+        "按图片从上到下、从左到右逐字抄写实际可见文字。保持原字符，不总结、不解释、不重排、不归类、不补全、不规范化。",
+        "原图未出现的标题、标签、括号、单位、说明和占位词不得添加。空白区域直接跳过，严禁写成无、未填写或其他推断值。",
+        "无法逐字确认的字符不得猜测。写入 uncertain_regions，并将 status 设为 partial。",
+        "逐字符核对姓名、机构、案号、日期、金额、利率、账号、验证码和印章代码。",
+        "来源身份：" + json.dumps(source_identity, ensure_ascii=False, separators=(",", ":")),
+        "任务身份：" + json.dumps(task_identity, ensure_ascii=False, separators=(",", ":")),
         "返回一个 JSON 对象，不得返回 Markdown、解释、描述或其他文字。",
         "uncertain_regions 每项只能包含 description、critical 和可选 source_ref。不得使用 text、context、reason 或其他字段。",
         "结构：" + json.dumps(vision_result_skeleton(task), ensure_ascii=False, separators=(",", ":")),
     ])
-
-
-def vision_chat_request(task: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "user_message": {
-            "content": [{"type": "text", "text": vision_agent_prompt(task, source)}],
-        },
-    }

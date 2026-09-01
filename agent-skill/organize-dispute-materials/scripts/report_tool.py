@@ -52,8 +52,8 @@ BASE_FIELD_NAMES = {
 NON_EVIDENTIARY_ROWS = {"completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v4"
 EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.7"
-EXPECTED_SKILL_VERSION = "6.8.1"
-EXPECTED_COMPONENT_BUILD = "6.8.1-skill-6.8.1"
+EXPECTED_SKILL_VERSION = "6.9.0"
+EXPECTED_COMPONENT_BUILD = "6.9.0-skill-6.9.0"
 EXPECTED_OPERATION = "process_target_record"
 STRONG_LEGACY_BASELINE_VERSIONS = {"6.7.0", "6.7.1", "6.7.2", "6.7.3", "6.7.4"}
 EXPECTED_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh"
@@ -77,7 +77,7 @@ EXPECTED_AGENT_CONTRACT = {
     "vision_agent_name": VISION_AGENT_NAME,
     "vision_agent_id": VISION_AGENT_ID,
     "vision_result_schema": VISION_RESULT_SCHEMA,
-    "vision_transport": "native_agent_tool",
+    "vision_transport": "aily_attachment_chat",
     "audio_transcription_service": "Feishu Minutes",
     "audio_result_schema": AUDIO_RESULT_SCHEMA,
     "write_policy": "main_agent_only",
@@ -867,7 +867,7 @@ def vision_receipt_set_sha256(tasks: list[dict[str, Any]], receipts_dir: Path) -
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def validate_vision_native_artifacts(
+def validate_vision_attachment_artifacts(
     item: dict[str, Any], task: dict[str, Any], receipts_dir: Path,
 ) -> None:
     task_id = scalarish(task.get("task_id"))
@@ -877,14 +877,17 @@ def validate_vision_native_artifacts(
     receipt_path = receipts_dir.resolve() / f"{task_id}.receipt.json"
     receipt = read_json(receipt_path)
     receipt_keys = {
-        "schema_version", "task_id", "source_sha256", "image_sha256", "agent_name", "transport",
-        "source_binding", "source_binding_sha256", "prompt_sha256", "response_sha256", "result_sha256",
+        "schema_version", "task_id", "source_sha256", "image_sha256", "agent_name", "agent_id",
+        "transport", "source_binding", "source_binding_sha256", "prompt_sha256", "attachment_id",
+        "agent_chat_id", "session_id", "upload_response_sha256", "chat_response_sha256",
+        "result_response_sha256", "response_sha256", "result_sha256",
     }
-    if set(receipt) != receipt_keys or receipt.get("schema_version") != "vision-native-agent-receipt/v1":
+    if set(receipt) != receipt_keys or receipt.get("schema_version") != "vision-attachment-agent-receipt/v1":
         raise ReportError("VISION_RECEIPT_INVALID", "视觉收集回执结构不正确", {"task_id": task_id})
-    expected_collection = {key: receipt[key] for key in receipt_keys - {
-        "schema_version", "task_id", "source_sha256", "image_sha256",
-    }}
+    collection_keys = receipt_keys - {
+        "schema_version", "task_id", "source_sha256", "image_sha256", "session_id",
+    }
+    expected_collection = {key: receipt[key] for key in collection_keys}
     if (
         receipt.get("task_id") != task_id
         or receipt.get("source_sha256") != task.get("source_sha256")
@@ -916,13 +919,24 @@ def validate_vision_native_artifacts(
     if read_json(result_path) != expected_result:
         raise ReportError("VISION_RECEIPT_INVALID", "视觉结果文件与证据包不一致", {"task_id": task_id})
     prompt = vision_agent_prompt(task, source)
+    raw_hashes = {
+        stage: sha256_file(receipts_dir.resolve() / f"{task_id}.{stage}.json")
+        for stage in ("upload", "chat", "result")
+    }
     if (
         receipt.get("agent_name") != VISION_AGENT_NAME
-        or receipt.get("transport") != "native_agent_tool"
+        or receipt.get("agent_id") != VISION_AGENT_ID
+        or receipt.get("transport") != "aily_attachment_chat"
         or receipt.get("prompt_sha256") != hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(receipt.get("attachment_id")))
+        or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(receipt.get("agent_chat_id")))
+        or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(receipt.get("session_id")))
+        or receipt.get("upload_response_sha256") != raw_hashes["upload"]
+        or receipt.get("chat_response_sha256") != raw_hashes["chat"]
+        or receipt.get("result_response_sha256") != raw_hashes["result"]
         or receipt.get("response_sha256") != receipt.get("result_sha256")
     ):
-        raise ReportError("VISION_RECEIPT_INVALID", "视觉原生调用身份或哈希不正确", {"task_id": task_id})
+        raise ReportError("VISION_RECEIPT_INVALID", "视觉附件会话身份或哈希不正确", {"task_id": task_id})
 
 
 def validate_vision_evidence(
@@ -971,7 +985,8 @@ def validate_vision_evidence(
         producer = item.get("producer")
         collection = item.get("collection")
         collection_hashes = {
-            "source_binding_sha256", "prompt_sha256", "response_sha256", "result_sha256",
+            "source_binding_sha256", "prompt_sha256", "upload_response_sha256",
+            "chat_response_sha256", "result_response_sha256", "response_sha256", "result_sha256",
         }
         source_binding = collection.get("source_binding") if isinstance(collection, dict) else None
         source_keys = {
@@ -992,10 +1007,14 @@ def validate_vision_evidence(
             or set(producer) != {"agent_name"}
             or not isinstance(collection, dict)
             or set(collection) != {
-                "agent_name", "transport", "source_binding", *collection_hashes,
+                "agent_name", "agent_id", "transport", "source_binding", "attachment_id",
+                "agent_chat_id", *collection_hashes,
             }
             or collection.get("agent_name") != VISION_AGENT_NAME
-            or collection.get("transport") != "native_agent_tool"
+            or collection.get("agent_id") != VISION_AGENT_ID
+            or collection.get("transport") != "aily_attachment_chat"
+            or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(collection.get("attachment_id")))
+            or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(collection.get("agent_chat_id")))
             or any(not re.fullmatch(r"[0-9a-f]{64}", scalarish(collection.get(key))) for key in collection_hashes)
             or not isinstance(source_binding, dict)
             or set(source_binding) != source_keys
@@ -1064,7 +1083,7 @@ def validate_vision_evidence(
             scalarish(item.get("task_id")): item for item in raw_expected_tasks if isinstance(item, dict)
         }
         for item in tasks:
-            validate_vision_native_artifacts(
+            validate_vision_attachment_artifacts(
                 item, expected_task_objects[scalarish(item.get("task_id"))], receipts_dir,
             )
         if artifacts.get("vision_receipts_sha256") != vision_receipt_set_sha256(raw_expected_tasks, receipts_dir):

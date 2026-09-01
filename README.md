@@ -1,81 +1,74 @@
 # 纠纷材料整理工作流组件
 
-当前待发布版本：小组件 `6.8.1` / Skill `6.8.1`
-本版本改用平台原生智能体调用能力逐项调用纠纷材料视觉核验员。视觉智能体只返回原文和不确定区域。纠纷材料整理专员在统一语料上唯一提取业务事实。OCR 只用于定位，不直接进入事实语料。
-文档架构：全附件回执绑定 + 平台原生视觉智能体调用 + Base 记录范围只读视觉证据 + 飞书妙记音频逐字稿 + 主智能体单写入 + 完整事实脚手架 + 固定 XML + 远端文档和权限读回 + Base 两阶段回写
+当前待发布版本：小组件 `6.9.0` / Skill `6.9.0`
 
 ```text
-多维表格 → 小组件 → 纠纷材料整理专员 → Skill 状态机 → 纠纷材料视觉核验员原生调用 + Feishu Minutes
+多维表格自动化
+→ 小组件向纠纷材料整理专员投递单记录运行信封
+→ Skill 下载并封印全部附件
+→ 原生文本直接进入逐字语料
+→ 有效图片快照通过附件会话交给纠纷材料视觉核验员
+→ 音频通过飞书妙记生成并读回逐字稿
+→ 纠纷材料整理专员唯一合并事实并生成固定报告
+→ 远端报告、权限和同记录 Base 写回统一读回
 ```
 
-小组件只接收 `targetRecordId`，负责精确定位并投递完整运行信封。Skill 负责附件提取、事实生成、文档创建、权限和同记录回写。小组件的 `accepted` 不代表报告已完成。
+小组件只接收 `targetRecordId`，精确读取一条记录并投递完整 `dispute-material-run/v6.7` 信封。小组件返回 `accepted` 只表示会话已创建。只有 Skill 的 `validate-completion` 返回 `completed` 才表示案件处理完成。
+
+## 发布目标
+
+```text
+app_id       = cli_aa1cd1168679dbc3
+blockTypeID  = blk_6a966d0b27410bcc81706268
+```
+
+`block-basekit-cli` 从仓库父目录的 `app.json` 读取 `app_id`，从本仓库的 `block.json` 读取 `blockTypeID`。两个标识必须属于同一个飞书应用，否则上传会被拒绝。
+
+## 责任边界
+
+- 纠纷材料整理专员是唯一事实合并者、报告生成者和业务写入者。
+- 纠纷材料视觉核验员只读取当前消息中的唯一图片附件并返回 `vision-evidence/v3`。
+- 飞书妙记只提供音频逐字稿和远端回执。
+- OCR 只用于定位视觉区域，不作为事实来源。
+- 自动化不写 AI 状态、报告链接、执行日志或材料处理基线。
 
 ## Base 字段
 
-保留隐藏文本字段：
+案件表必须保留隐藏文本字段 `材料处理基线`。基线由脚本确定性生成，用于绑定 Base、记录、案件编号、报告 token、报告 URL、revision、报告内容哈希、附件集合、上传人权限、Skill 版本和证据包哈希。
 
-```text
-材料处理基线
-```
-
-其内容由脚本确定性生成，核心字段为：
+当前版本标识：
 
 ```json
 {
-  "app_token": "固定 Base token",
-  "table_id": "固定表 ID",
-  "record_id": "案件记录 ID",
-  "case_number": "案件编号",
-  "document_token": "报告 token",
-  "report_url": "报告 URL",
-  "document_revision_id": 1,
-  "report_content_sha256": "远程报告正文 SHA-256",
-  "processed_attachment_ids": ["已处理附件 ID"],
-  "authorized_uploader_open_ids": ["已读回 full_access 的上传人 open_id"],
-  "contract_version": "6.8.1",
-  "component_build": "6.8.1-skill-6.8.1",
-  "skill_version": "6.8.1",
-  "source_corpus_sha256": "最终语料 SHA-256",
-  "vision_verification": {},
-  "audio_verification": {},
-  "audio_minutes": {
-    "音频 SHA-256": {
-      "file_token": "云盘文件 token",
-      "minute_token": "妙记 token",
-      "minute_url": "妙记 URL",
-      "transcript_sha256": "逐字稿 SHA-256"
-    }
-  }
+  "contract_version": "6.9.0",
+  "component_build": "6.9.0-skill-6.9.0",
+  "skill_version": "6.9.0"
 }
 ```
 
-它用于绑定同案附件、上传人、报告 revision 和旧合同迁移，不承担报告质量结论。`6.7.0`、`6.7.1`、`6.7.2`、`6.7.3` 和 `6.7.4` 只有完整记录、build、Skill、revision 和 hash 均一致时才迁移；`6.5.x` 弱基线还必须以基线 token、Base 展示标题、远端标题和案件编号证明同源。完成记录再次触发时仍进入 supplement 全量复核，不以本地基线直接返回 no-op。
+`6.7.0` 至 `6.7.4` 的强基线只有在完整记录、build、Skill、revision 和 hash 全部一致时才允许迁移。`6.5.x` 弱基线还必须由基线 token、Base 展示标题、远端标题和案件编号共同证明同源。已完成记录再次触发时进入 supplement 全量复核，不直接返回 no-op。
 
-事务采用单调提交：候选报告读回通过后先写入同记录阶段绑定，再授权并完成最终提交；最终写后重新读取 Base、报告正文和协作者列表统一验证。失败先分类 `processing/staged/completed/conflict`，禁止无条件回滚或覆盖人工修改。
+## 自动化映射
 
-## 自动化
-
-只映射：
+直接处理当前记录：
 
 ```text
 targetRecordId = 当前触发记录.Record ID
 ```
 
-如果前一步新建记录：
+前一步新建记录：
 
 ```text
 targetRecordId = 第 1 步新增案件记录.Record ID
 ```
 
-自动化不修改状态、链接、日志或材料处理基线。
-
-## 打包
+## 构建与打包
 
 ```bash
 npm run build
 python3 agent-skill/organize-dispute-materials/scripts/package_skill.py \
   --source agent-skill/organize-dispute-materials \
-  --output output/organize-dispute-materials-v6.8.1.zip \
-  --expected-version 6.8.1 --json
-unzip -t output/organize-dispute-materials-v6.8.1.zip
+  --output output/organize-dispute-materials-v6.9.0.zip \
+  --expected-version 6.9.0 --json
+unzip -t output/organize-dispute-materials-v6.9.0.zip
 ```

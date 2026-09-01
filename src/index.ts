@@ -17,7 +17,7 @@ import {
 
 const OPEN_API = "https://open.feishu.cn/open-apis";
 const ORGANIZER_AGENT_ID = "agent_4kuakyp7zsa2xuc";
-const BUILD_ID = "6.8.1-skill-6.8.1";
+const BUILD_ID = "6.9.0-skill-6.9.0";
 const REQUEST_TIMEOUT_MS = 10_000;
 const PROCESSING_LEASE_MS = 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;

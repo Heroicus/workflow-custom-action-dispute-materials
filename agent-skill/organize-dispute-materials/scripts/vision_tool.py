@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare, accept and reconcile evidence from the named visual agent."""
+"""Prepare, transcribe and reconcile evidence from the named visual agent."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -25,11 +27,13 @@ from evidence_contract import (
 
 
 PACK_SCHEMA = "vision-evidence-pack/v4"
-INVOCATION_SCHEMA = "vision-native-invocation-batch/v1"
-RECEIPT_SCHEMA = "vision-native-agent-receipt/v1"
+INVOCATION_SCHEMA = "vision-attachment-invocation-batch/v1"
+RECEIPT_SCHEMA = "vision-attachment-agent-receipt/v1"
 SOURCE_SCHEMA = "vision-base-source/v1"
-TRANSPORT = "native_agent_tool"
+TRANSPORT = "aily_attachment_chat"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+AILY_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+AILY_API_ROOT = f"/open-apis/aily/v1/agents/{VISION_AGENT_ID}"
 RESULT_KEYS = {
     "schema_version", "task_id", "source_sha256", "image_sha256", "producer",
     "status", "verbatim_text", "uncertain_regions",
@@ -101,6 +105,67 @@ def read_object(path: Path, code: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise VisionError(code, f"JSON 根节点必须是对象：{path.name}")
     return value
+
+
+def parse_cli_object(raw: str, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise VisionError(
+            "VISION_REMOTE_RESPONSE_INVALID", f"{label}未返回 JSON", {"reason": str(exc)},
+        ) from exc
+    if not isinstance(value, dict) or value.get("ok") is not True or not isinstance(value.get("data"), dict):
+        raise VisionError("VISION_REMOTE_RESPONSE_INVALID", f"{label}响应结构不正确")
+    return value
+
+
+def run_lark(
+    executable: str, arguments: list[str], cwd: Path, timeout: int, label: str,
+) -> tuple[dict[str, Any], str]:
+    try:
+        completed = subprocess.run(
+            [executable, *arguments], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise VisionError("VISION_TRANSPORT_TIMEOUT", f"{label}超时") from exc
+    if completed.returncode != 0:
+        raise VisionError(
+            "VISION_TRANSPORT_FAILED", f"{label}失败",
+            {"returncode": completed.returncode, "stderr": completed.stderr.strip()[-2000:]},
+        )
+    return parse_cli_object(completed.stdout, label), completed.stdout
+
+
+def response_path(receipts_dir: Path, task_id: str, stage: str) -> Path:
+    return receipts_dir.resolve() / f"{task_id}.{stage}.json"
+
+
+def write_remote_response(path: Path, raw: str) -> str:
+    atomic_write(path, raw)
+    return sha256_file(path)
+
+
+def content_text(result: dict[str, Any], task_id: str) -> str:
+    data = result["data"]
+    if data.get("status") != "Completed":
+        raise VisionError(
+            "VISION_REMOTE_RESPONSE_INVALID", "视觉会话未完成",
+            {"task_id": task_id, "status": data.get("status")},
+        )
+    content = data.get("content")
+    if (
+        not isinstance(content, list)
+        or len(content) != 1
+        or not isinstance(content[0], dict)
+        or content[0].get("type") != "text"
+        or not isinstance(content[0].get("text"), str)
+        or not content[0]["text"].strip()
+    ):
+        raise VisionError(
+            "VISION_REMOTE_RESPONSE_INVALID", "视觉会话未返回唯一文本结果", {"task_id": task_id},
+        )
+    return content[0]["text"].strip()
 
 
 def required_text(value: Any, label: str, code: str) -> str:
@@ -216,6 +281,7 @@ def load_tasks(path: Path, image_root: Path) -> list[dict[str, Any]]:
             or not HEX64.fullmatch(image_hash)
             or type(item.get("image_size")) is not int
             or item["image_size"] <= 0
+            or item["image_size"] > AILY_IMAGE_MAX_BYTES
         ):
             raise VisionError("VISION_TASKS_INVALID", "视觉任务身份、哈希或大小不正确", {"task_id": task_id})
         validate_image_transform(item)
@@ -358,7 +424,9 @@ def prepare(
         invocations.append({
             "task_id": task_id,
             "agent_name": VISION_AGENT_NAME,
+            "agent_id": VISION_AGENT_ID,
             "transport": TRANSPORT,
+            "image_file": task["image_file"],
             "source_binding": source,
             "source_binding_sha256": sha256_text(canonical(source)),
             "prompt": prompt,
@@ -369,6 +437,7 @@ def prepare(
         "schema_version": INVOCATION_SCHEMA,
         "policy": {
             "agent_name": VISION_AGENT_NAME,
+            "agent_id": VISION_AGENT_ID,
             "transport": TRANSPORT,
             "one_task_per_invocation": True,
             "write_scope": "read_only_evidence",
@@ -386,6 +455,7 @@ def load_invocations(
     root = read_object(path, "VISION_INVOCATION_INVALID")
     expected_policy = {
         "agent_name": VISION_AGENT_NAME,
+        "agent_id": VISION_AGENT_ID,
         "transport": TRANSPORT,
         "one_task_per_invocation": True,
         "write_scope": "read_only_evidence",
@@ -401,8 +471,8 @@ def load_invocations(
     task_map = {str(task["task_id"]): task for task in tasks}
     invocations: dict[str, dict[str, Any]] = {}
     required = {
-        "task_id", "agent_name", "transport", "source_binding", "source_binding_sha256",
-        "prompt", "prompt_sha256", "response_file",
+        "task_id", "agent_name", "agent_id", "transport", "image_file", "source_binding",
+        "source_binding_sha256", "prompt", "prompt_sha256", "response_file",
     }
     for item in root["invocations"]:
         if not isinstance(item, dict) or set(item) != required:
@@ -416,7 +486,9 @@ def load_invocations(
         if item != {
             "task_id": task_id,
             "agent_name": VISION_AGENT_NAME,
+            "agent_id": VISION_AGENT_ID,
             "transport": TRANSPORT,
+            "image_file": task["image_file"],
             "source_binding": source,
             "source_binding_sha256": sha256_text(canonical(source)),
             "prompt": prompt,
@@ -430,56 +502,168 @@ def load_invocations(
     return invocations
 
 
-def accept(
+def transcribe(
     runtime_path: Path, seal_path: Path, tasks_path: Path, image_root: Path,
-    invocations_path: Path, responses_dir: Path, results_dir: Path, receipts_dir: Path,
+    invocations_path: Path, results_dir: Path, receipts_dir: Path, lark_cli: str,
+    wait_seconds: int, poll_seconds: int, command_timeout: int,
 ) -> dict[str, Any]:
+    if wait_seconds <= 0 or poll_seconds <= 0 or command_timeout <= 0:
+        raise VisionError("VISION_TRANSPORT_CONFIG_INVALID", "视觉超时和轮询参数必须大于零")
     tasks = load_tasks(tasks_path, image_root)
     sources = load_source_bindings(runtime_path, seal_path, tasks)
     invocations = load_invocations(invocations_path, tasks, sources)
-    expected_files = {f"{task['task_id']}.json" for task in tasks}
-    actual_files = {path.name for path in responses_dir.glob("*.json")}
-    if actual_files != expected_files:
-        raise VisionError(
-            "VISION_RESPONSE_SET_INVALID", "视觉响应文件与任务不一致",
-            {"missing": sorted(expected_files - actual_files), "unknown": sorted(actual_files - expected_files)},
-        )
     results_dir.mkdir(parents=True, exist_ok=True)
     receipts_dir.mkdir(parents=True, exist_ok=True)
-    accepted = 0
+    executable = Path(lark_cli).expanduser() if lark_cli else None
+    if executable is None or not executable.is_file():
+        discovered = shutil.which(lark_cli or "lark-cli")
+        executable = Path(discovered) if discovered else None
+    if executable is None:
+        raise VisionError("VISION_TRANSPORT_UNAVAILABLE", "找不到 lark-cli")
+
+    sessions: dict[str, dict[str, Any]] = {}
     for task in tasks:
         task_id = str(task["task_id"])
-        response_path = responses_dir.resolve() / f"{task_id}.json"
-        raw = response_path.read_text(encoding="utf-8")
-        value = read_object(response_path, "VISION_RESULT_INVALID")
-        _, unresolved = validate_result(task, value)
-        if unresolved:
-            raise VisionError("VISION_RESULT_INCOMPLETE", "视觉智能体未返回完整逐字结果", {"task_id": task_id, "items": unresolved})
-        _, before = verify_image(task, image_root)
         invocation = invocations[task_id]
-        source = sources[task_id]
-        result_path = results_dir.resolve() / f"{task_id}.json"
-        shutil.copyfile(response_path, result_path)
-        receipt = {
-            "schema_version": RECEIPT_SCHEMA,
-            "task_id": task_id,
-            "source_sha256": task["source_sha256"],
-            "image_sha256": task["image_sha256"],
-            "agent_name": VISION_AGENT_NAME,
-            "transport": TRANSPORT,
-            "source_binding": source,
-            "source_binding_sha256": invocation["source_binding_sha256"],
-            "prompt_sha256": invocation["prompt_sha256"],
-            "response_sha256": sha256_text(raw),
-            "result_sha256": sha256_file(result_path),
+        image, before = verify_image(task, image_root)
+        upload, upload_raw = run_lark(
+            str(executable), [
+                "api", "POST", f"{AILY_API_ROOT}/attachments", "--as", "user",
+                "--data", '{"type":"image"}', "--file", f"file={image.name}", "--format", "json",
+            ], image.parent, command_timeout, "视觉附件上传",
+        )
+        attachment_id = upload["data"].get("agent_attachment_id")
+        if not isinstance(attachment_id, str) or not REMOTE_ID.fullmatch(attachment_id):
+            raise VisionError(
+                "VISION_REMOTE_RESPONSE_INVALID", "视觉附件上传响应缺少附件标识", {"task_id": task_id},
+            )
+        upload_sha256 = write_remote_response(response_path(receipts_dir, task_id, "upload"), upload_raw)
+        chat_body = {
+            "stream": False,
+            "user_message": {
+                "content": [{"type": "text", "text": invocation["prompt"]}],
+                "agent_attachment_ids": [attachment_id],
+            },
         }
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=receipts_dir, prefix=f".{task_id}.chat.", suffix=".json", delete=False,
+        ) as handle:
+            json.dump(chat_body, handle, ensure_ascii=False, separators=(",", ":"))
+            request_path = Path(handle.name)
+        try:
+            chat, chat_raw = run_lark(
+                str(executable), [
+                    "api", "POST", f"{AILY_API_ROOT}/chats", "--as", "user",
+                    "--data", f"@{request_path.name}", "--format", "json",
+                ], receipts_dir, command_timeout, "视觉会话创建",
+            )
+        finally:
+            request_path.unlink(missing_ok=True)
+        agent_chat_id = chat["data"].get("agent_chat_id")
+        session_id = chat["data"].get("session_id")
+        if (
+            not isinstance(agent_chat_id, str)
+            or not REMOTE_ID.fullmatch(agent_chat_id)
+            or not isinstance(session_id, str)
+            or not REMOTE_ID.fullmatch(session_id)
+        ):
+            raise VisionError(
+                "VISION_REMOTE_RESPONSE_INVALID", "视觉会话创建响应缺少会话标识", {"task_id": task_id},
+            )
+        chat_sha256 = write_remote_response(response_path(receipts_dir, task_id, "chat"), chat_raw)
         _, after = verify_image(task, image_root)
         if before != after:
-            result_path.unlink(missing_ok=True)
-            raise VisionError("VISION_SNAPSHOT_INVALID", "视觉工件在接收期间发生变化", {"task_id": task_id})
-        atomic_write(receipts_dir / f"{task_id}.receipt.json", json.dumps(receipt, ensure_ascii=False, indent=2))
-        accepted += 1
-    return {"status": "accepted", "expected": len(tasks), "received": accepted}
+            raise VisionError("VISION_SNAPSHOT_INVALID", "视觉工件在上传期间发生变化", {"task_id": task_id})
+        sessions[task_id] = {
+            "task": task,
+            "invocation": invocation,
+            "source": sources[task_id],
+            "fingerprint": before,
+            "attachment_id": attachment_id,
+            "agent_chat_id": agent_chat_id,
+            "session_id": session_id,
+            "upload_response_sha256": upload_sha256,
+            "chat_response_sha256": chat_sha256,
+        }
+
+    deadline = time.monotonic() + wait_seconds
+    pending = set(sessions)
+    while pending:
+        for task_id in sorted(pending):
+            session = sessions[task_id]
+            result, result_raw = run_lark(
+                str(executable), [
+                    "api", "GET", f"{AILY_API_ROOT}/chats/{session['agent_chat_id']}",
+                    "--as", "user", "--format", "json",
+                ], receipts_dir, command_timeout, "视觉结果读回",
+            )
+            status = result["data"].get("status")
+            if status == "Running":
+                continue
+            if status != "Completed":
+                raise VisionError(
+                    "VISION_REMOTE_RESPONSE_INVALID", "视觉会话异常结束",
+                    {"task_id": task_id, "status": status},
+                )
+            raw_text = content_text(result, task_id)
+            try:
+                value = json.loads(raw_text)
+            except json.JSONDecodeError as exc:
+                raise VisionError(
+                    "VISION_RESULT_INVALID", "视觉智能体结果不是 JSON", {"task_id": task_id, "reason": str(exc)},
+                ) from exc
+            if not isinstance(value, dict):
+                raise VisionError("VISION_RESULT_INVALID", "视觉智能体结果根节点不是对象", {"task_id": task_id})
+            _, unresolved = validate_result(session["task"], value)
+            if unresolved:
+                raise VisionError(
+                    "VISION_RESULT_INCOMPLETE", "视觉智能体未返回完整逐字结果",
+                    {"task_id": task_id, "items": unresolved},
+                )
+            result_path = results_dir.resolve() / f"{task_id}.json"
+            atomic_write(result_path, raw_text)
+            result_response_sha256 = write_remote_response(
+                response_path(receipts_dir, task_id, "result"), result_raw,
+            )
+            _, after = verify_image(session["task"], image_root)
+            if session["fingerprint"] != after:
+                result_path.unlink(missing_ok=True)
+                raise VisionError(
+                    "VISION_SNAPSHOT_INVALID", "视觉工件在结果读回期间发生变化", {"task_id": task_id},
+                )
+            invocation = session["invocation"]
+            receipt = {
+                "schema_version": RECEIPT_SCHEMA,
+                "task_id": task_id,
+                "source_sha256": session["task"]["source_sha256"],
+                "image_sha256": session["task"]["image_sha256"],
+                "agent_name": VISION_AGENT_NAME,
+                "agent_id": VISION_AGENT_ID,
+                "transport": TRANSPORT,
+                "source_binding": session["source"],
+                "source_binding_sha256": invocation["source_binding_sha256"],
+                "prompt_sha256": invocation["prompt_sha256"],
+                "attachment_id": session["attachment_id"],
+                "agent_chat_id": session["agent_chat_id"],
+                "session_id": session["session_id"],
+                "upload_response_sha256": session["upload_response_sha256"],
+                "chat_response_sha256": session["chat_response_sha256"],
+                "result_response_sha256": result_response_sha256,
+                "response_sha256": sha256_text(raw_text),
+                "result_sha256": sha256_file(result_path),
+            }
+            atomic_write(
+                receipts_dir / f"{task_id}.receipt.json",
+                json.dumps(receipt, ensure_ascii=False, indent=2),
+            )
+            pending.remove(task_id)
+        if pending:
+            if time.monotonic() >= deadline:
+                raise VisionError(
+                    "VISION_RESULT_TIMEOUT", "视觉结果等待超时", {"task_ids": sorted(pending)},
+                )
+            time.sleep(max(1, poll_seconds))
+    return {"status": "complete", "expected": len(tasks), "received": len(tasks)}
 
 
 def receipt_set_sha256(tasks: list[dict[str, Any]], receipts_dir: Path) -> str:
@@ -499,10 +683,16 @@ def validate_receipt(
     task_id = str(task["task_id"])
     receipt = read_object(receipts_dir / f"{task_id}.receipt.json", "VISION_RECEIPT_INVALID")
     keys = {
-        "schema_version", "task_id", "source_sha256", "image_sha256", "agent_name", "transport",
-        "source_binding", "source_binding_sha256", "prompt_sha256", "response_sha256", "result_sha256",
+        "schema_version", "task_id", "source_sha256", "image_sha256", "agent_name", "agent_id",
+        "transport", "source_binding", "source_binding_sha256", "prompt_sha256", "attachment_id",
+        "agent_chat_id", "session_id", "upload_response_sha256", "chat_response_sha256",
+        "result_response_sha256", "response_sha256", "result_sha256",
     }
     prompt = vision_agent_prompt(task, source)
+    remote_hashes = {
+        stage: sha256_file(response_path(receipts_dir, task_id, stage))
+        for stage in ("upload", "chat", "result")
+    }
     if (
         set(receipt) != keys
         or receipt.get("schema_version") != RECEIPT_SCHEMA
@@ -510,14 +700,24 @@ def validate_receipt(
         or receipt.get("source_sha256") != task.get("source_sha256")
         or receipt.get("image_sha256") != task.get("image_sha256")
         or receipt.get("agent_name") != VISION_AGENT_NAME
+        or receipt.get("agent_id") != VISION_AGENT_ID
         or receipt.get("transport") != TRANSPORT
         or receipt.get("source_binding") != source
         or receipt.get("source_binding_sha256") != sha256_text(canonical(source))
         or receipt.get("prompt_sha256") != sha256_text(prompt)
+        or not isinstance(receipt.get("attachment_id"), str)
+        or not REMOTE_ID.fullmatch(receipt["attachment_id"])
+        or not isinstance(receipt.get("agent_chat_id"), str)
+        or not REMOTE_ID.fullmatch(receipt["agent_chat_id"])
+        or not isinstance(receipt.get("session_id"), str)
+        or not REMOTE_ID.fullmatch(receipt["session_id"])
+        or receipt.get("upload_response_sha256") != remote_hashes["upload"]
+        or receipt.get("chat_response_sha256") != remote_hashes["chat"]
+        or receipt.get("result_response_sha256") != remote_hashes["result"]
         or receipt.get("response_sha256") != sha256_file(result_path)
         or receipt.get("result_sha256") != sha256_file(result_path)
     ):
-        raise VisionError("VISION_RECEIPT_INVALID", "视觉原生调用回执与任务不一致", {"task_id": task_id})
+        raise VisionError("VISION_RECEIPT_INVALID", "视觉附件会话回执与任务不一致", {"task_id": task_id})
     return receipt
 
 
@@ -548,10 +748,16 @@ def reconcile(
         receipt = validate_receipt(task, sources[task_id], result_path, receipts_dir)
         result["collection"] = {
             "agent_name": receipt["agent_name"],
+            "agent_id": receipt["agent_id"],
             "transport": receipt["transport"],
             "source_binding": receipt["source_binding"],
             "source_binding_sha256": receipt["source_binding_sha256"],
             "prompt_sha256": receipt["prompt_sha256"],
+            "attachment_id": receipt["attachment_id"],
+            "agent_chat_id": receipt["agent_chat_id"],
+            "upload_response_sha256": receipt["upload_response_sha256"],
+            "chat_response_sha256": receipt["chat_response_sha256"],
+            "result_response_sha256": receipt["result_response_sha256"],
             "response_sha256": receipt["response_sha256"],
             "result_sha256": receipt["result_sha256"],
         }
@@ -607,11 +813,14 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--image-root", type=Path, required=True)
     prepare_parser = subparsers.add_parser("prepare", parents=[common])
     prepare_parser.add_argument("--output", type=Path, required=True)
-    accept_parser = subparsers.add_parser("accept", parents=[common])
-    accept_parser.add_argument("--invocations", type=Path, required=True)
-    accept_parser.add_argument("--responses-dir", type=Path, required=True)
-    accept_parser.add_argument("--results-dir", type=Path, required=True)
-    accept_parser.add_argument("--receipts-dir", type=Path, required=True)
+    transcribe_parser = subparsers.add_parser("transcribe", parents=[common])
+    transcribe_parser.add_argument("--invocations", type=Path, required=True)
+    transcribe_parser.add_argument("--results-dir", type=Path, required=True)
+    transcribe_parser.add_argument("--receipts-dir", type=Path, required=True)
+    transcribe_parser.add_argument("--lark-cli", default="lark-cli")
+    transcribe_parser.add_argument("--wait-seconds", type=int, default=240)
+    transcribe_parser.add_argument("--poll-seconds", type=int, default=3)
+    transcribe_parser.add_argument("--command-timeout", type=int, default=120)
     reconcile_parser = subparsers.add_parser("reconcile", parents=[common])
     reconcile_parser.add_argument("--results-dir", type=Path, required=True)
     reconcile_parser.add_argument("--receipts-dir", type=Path, required=True)
@@ -626,10 +835,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "prepare":
             output = prepare(args.runtime, args.download_seal, args.tasks, args.image_root, args.output)
-        elif args.command == "accept":
-            output = accept(
+        elif args.command == "transcribe":
+            output = transcribe(
                 args.runtime, args.download_seal, args.tasks, args.image_root,
-                args.invocations, args.responses_dir, args.results_dir, args.receipts_dir,
+                args.invocations, args.results_dir, args.receipts_dir, args.lark_cli,
+                args.wait_seconds, args.poll_seconds, args.command_timeout,
             )
         else:
             output = reconcile(

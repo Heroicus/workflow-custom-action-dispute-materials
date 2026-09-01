@@ -43,6 +43,8 @@ MIN_TEXT_CHARS_PER_PDF_PAGE = 24
 PDF_OCR_DPI = 300
 AILY_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 AILY_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+MIN_EMBEDDED_IMAGE_PIXELS = 60_000
+MIN_EMBEDDED_IMAGE_EDGE = 120
 DOWNLOAD_SEAL_SCHEMA = "attachment-download-seal/v1"
 DOWNLOAD_FIELD_ID = "fldOz2CYX4"
 
@@ -412,6 +414,28 @@ def xml_text(payload: bytes) -> str:
     return "\n".join(values)
 
 
+def meaningful_embedded_image(path: Path) -> bool:
+    """Exclude decorative icons while preserving material images and seals."""
+
+    try:
+        from PIL import Image
+
+        with Image.open(path) as opened:
+            width, height = opened.size
+    except Exception:
+        try:
+            import fitz  # type: ignore
+
+            pixmap = fitz.Pixmap(str(path))
+            width, height = pixmap.width, pixmap.height
+        except Exception:
+            return False
+    return (
+        min(width, height) >= MIN_EMBEDDED_IMAGE_EDGE
+        and width * height >= MIN_EMBEDDED_IMAGE_PIXELS
+    )
+
+
 def extract_ooxml(
     path: Path,
     collector: VisionCollector | None = None,
@@ -440,6 +464,8 @@ def extract_ooxml(
                 with tempfile.NamedTemporaryFile(suffix=Path(name).suffix, delete=False) as handle:
                     temporary_name = handle.name
                     handle.write(archive.read(member))
+                if not meaningful_embedded_image(Path(temporary_name)):
+                    continue
                 try:
                     ocr = run_tesseract(Path(temporary_name))
                 except MaterialError:
@@ -552,13 +578,6 @@ def extract_audio(
     return "", ["feishu_minutes_transcription_required"]
 
 
-def has_page_image(page: object) -> bool:
-    try:
-        return bool(page.get_images(full=True))  # type: ignore[attr-defined]
-    except Exception:
-        return False
-
-
 def extract_pdf(
     path: Path,
     collector: VisionCollector | None = None,
@@ -579,10 +598,9 @@ def extract_pdf(
             page = document[page_index]
             text = page.get_text("text").strip()
             has_native_text = normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE
-            page_image = has_page_image(page)
-            if has_native_text and not page_image and collector is None:
+            if has_native_text:
                 methods.add("pdf_text")
-            else:
+            if not has_native_text:
                 temporary_name = ""
                 try:
                     pixmap = page.get_pixmap(dpi=PDF_OCR_DPI, alpha=False)
@@ -595,9 +613,7 @@ def extract_pdf(
                     except MaterialError:
                         ocr = OCRResult(text="", mean_confidence=None)
                         methods.add("ocr_unavailable")
-                    if has_native_text:
-                        methods.add("pdf_text")
-                    elif ocr.text:
+                    if ocr.text:
                         methods.add("ocr_hint_only")
                     if collector:
                         collector.add(
@@ -615,6 +631,97 @@ def extract_pdf(
                 finally:
                     if temporary_name:
                         Path(temporary_name).unlink(missing_ok=True)
+            elif collector:
+                try:
+                    page_area = max(1.0, float(page.rect.width * page.rect.height))
+                    image_blocks = [
+                        block for block in page.get_text("dict").get("blocks", [])
+                        if isinstance(block, dict) and block.get("type") == 1
+                    ]
+                    scanned_page = False
+                    for block in image_blocks:
+                        bbox = block.get("bbox") or (0, 0, 0, 0)
+                        try:
+                            x0, y0, x1, y1 = (float(value) for value in bbox)
+                        except (TypeError, ValueError):
+                            continue
+                        if max(0.0, (x1 - x0) * (y1 - y0)) / page_area >= 0.75:
+                            scanned_page = True
+                            break
+                    if scanned_page:
+                        temporary_name = ""
+                        try:
+                            pixmap = page.get_pixmap(dpi=PDF_OCR_DPI, alpha=False)
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+                                temporary_name = handle.name
+                            pixmap.save(temporary_name)
+                            rendered_page = Path(temporary_name)
+                            try:
+                                ocr = run_tesseract(rendered_page)
+                                methods.add("ocr")
+                            except MaterialError:
+                                ocr = OCRResult(text="", mean_confidence=None)
+                                methods.add("ocr_unavailable")
+                            collector.add(
+                                rendered_page,
+                                source_file=display_name or path.name,
+                                source_sha256=source_sha256 or sha256_file(path),
+                                unit=f"page:{page_index + 1}",
+                                page=page_index + 1,
+                                reason="pdf_scanned_page_with_text_layer",
+                                ocr=ocr,
+                            )
+                            methods.add("vision_required")
+                        finally:
+                            if temporary_name:
+                                Path(temporary_name).unlink(missing_ok=True)
+                        pages.append(f"[第{page_index + 1}页]\n{text}")
+                        continue
+                    image_index = 0
+                    for block in image_blocks:
+                        payload = block.get("image")
+                        extension = str(block.get("ext") or "png").lower()
+                        width = int(block.get("width") or 0)
+                        height = int(block.get("height") or 0)
+                        bbox = block.get("bbox") or (0, 0, 0, 0)
+                        if not isinstance(payload, (bytes, bytearray)) or extension not in {"png", "jpg", "jpeg"}:
+                            continue
+                        if min(width, height) < MIN_EMBEDDED_IMAGE_EDGE or width * height < MIN_EMBEDDED_IMAGE_PIXELS:
+                            continue
+                        try:
+                            x0, y0, x1, y1 = (float(value) for value in bbox)
+                        except (TypeError, ValueError):
+                            continue
+                        coverage = max(0.0, (x1 - x0) * (y1 - y0)) / page_area
+                        image_index += 1
+                        suffix = ".jpg" if extension in {"jpg", "jpeg"} else ".png"
+                        temporary_name = ""
+                        try:
+                            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                                temporary_name = handle.name
+                                handle.write(payload)
+                            embedded = Path(temporary_name)
+                            try:
+                                ocr = run_tesseract(embedded)
+                                methods.add("ocr")
+                            except MaterialError:
+                                ocr = OCRResult(text="", mean_confidence=None)
+                                methods.add("ocr_unavailable")
+                            collector.add(
+                                embedded,
+                                source_file=f"{display_name or path.name}::page:{page_index + 1}:image:{image_index}",
+                                source_sha256=source_sha256 or sha256_file(path),
+                                unit=f"page:{page_index + 1}:image:{image_index}",
+                                page=page_index + 1,
+                                reason="pdf_embedded_image",
+                                ocr=ocr,
+                            )
+                            methods.add("vision_required")
+                        finally:
+                            if temporary_name:
+                                Path(temporary_name).unlink(missing_ok=True)
+                except Exception as exc:
+                    failures.append(f"page:{page_index + 1}:embedded:{type(exc).__name__}")
             pages.append(f"[第{page_index + 1}页]\n{text}" if text else f"[第{page_index + 1}页]")
     finally:
         document.close()
@@ -652,7 +759,7 @@ def extract_pdf_cli(
         has_native_text = normalized_char_count(text) >= MIN_TEXT_CHARS_PER_PDF_PAGE
         if has_native_text:
             methods.add("pdf_text")
-        if collector is not None and pdftoppm:
+        if collector is not None and not has_native_text and pdftoppm:
             with tempfile.TemporaryDirectory(prefix="odm-pdf-page-") as directory:
                 prefix = Path(directory) / "page"
                 rendered = subprocess.run(
@@ -684,7 +791,7 @@ def extract_pdf_cli(
                     methods.add("vision_required")
                 except MaterialError as exc:
                     failures.append(f"page:{page_number}:{type(exc).__name__}")
-        elif collector is not None:
+        elif collector is not None and not has_native_text:
             failures.append(f"page:{page_number}:OCRUnavailable")
         pages.append(f"[第{page_number}页]\n{text}" if text else f"[第{page_number}页]")
     return "\n\n".join(pages), page_count, sorted(methods), failures

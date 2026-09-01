@@ -1,8 +1,8 @@
 {
   "name": "案件材料处理自动化",
-  "component": "6.8.1-skill-6.8.1",
+  "component": "6.9.0-skill-6.9.0",
   "common_action": {
-    "component_block_type_id": "blk_6a7e783b4b408cb2ed5d02ca",
+    "component_block_type_id": "blk_6a966d0b27410bcc81706268",
     "form_mapping": {
       "targetRecordId": "目标案件记录.Record ID"
     }
