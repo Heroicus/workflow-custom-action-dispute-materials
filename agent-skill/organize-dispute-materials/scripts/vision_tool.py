@@ -25,15 +25,14 @@ from evidence_contract import (
     VISION_AGENT_NAME as EXPECTED_AGENT,
     VISION_RESULT_SCHEMA as RESULT_SCHEMA,
     VISION_TASK_SCHEMA as TASK_SCHEMA,
-    vision_attachment_request as attachment_request,
     vision_chat_request as chat_request,
 )
 
 PACK_SCHEMA = "vision-evidence-pack/v3"
-STATE_SCHEMA = "vision-collection-state/v2"
-RECEIPT_SCHEMA = "vision-collection-receipt/v2"
-AILY_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
-AILY_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+STATE_SCHEMA = "vision-collection-state/v3"
+RECEIPT_SCHEMA = "vision-collection-receipt/v3"
+SOURCE_SCHEMA = "vision-base-source/v1"
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 ALLOWED_STATUS = {"complete", "partial", "failed"}
 RESULT_KEYS = {
     "schema_version", "task_id", "source_sha256", "image_sha256", "producer",
@@ -47,6 +46,9 @@ TASK_KEYS = {
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TASK_ID = re.compile(r"^vis_[0-9a-f]{20}$")
 REMOTE_ID = re.compile(r"^[A-Za-z0-9_-]{8,256}$")
+BASE_TOKEN = re.compile(r"^[A-Za-z0-9_-]{8,256}$")
+TABLE_ID = re.compile(r"^tbl[A-Za-z0-9_-]{1,125}$")
+RECORD_ID = re.compile(r"^rec[A-Za-z0-9_-]{1,125}$")
 
 
 class VisionError(Exception):
@@ -142,9 +144,9 @@ def verify_image(task: dict[str, Any], image_root: Path) -> tuple[Path, tuple[in
             "VISION_SNAPSHOT_INVALID", "视觉工件与不可变快照不一致",
             {"task_id": task_id, "expected_size": task["image_size"], "actual_size": fingerprint[2]},
         )
-    if image.suffix.lower() not in AILY_IMAGE_SUFFIXES or fingerprint[2] > AILY_IMAGE_MAX_BYTES:
+    if image.suffix.lower() not in IMAGE_SUFFIXES:
         raise VisionError(
-            "VISION_ATTACHMENT_UNSUPPORTED", "视觉工件不符合 Aily 图片附件格式或大小限制",
+            "VISION_SNAPSHOT_INVALID", "视觉工件格式不正确",
             {"task_id": task_id, "suffix": image.suffix.lower(), "size": fingerprint[2]},
         )
     return image, fingerprint
@@ -222,6 +224,77 @@ def load_tasks(path: Path, image_root: Path) -> list[dict[str, Any]]:
     return tasks
 
 
+def load_source_bindings(
+    runtime_path: Path, seal_path: Path, tasks: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    runtime = read_object(runtime_path, "VISION_SOURCE_INVALID")
+    seal = read_object(seal_path, "VISION_SOURCE_INVALID")
+    app_token = required_text(runtime.get("app_token"), "runtime.app_token", "VISION_SOURCE_INVALID")
+    table_id = required_text(runtime.get("table_id"), "runtime.table_id", "VISION_SOURCE_INVALID")
+    record_id = required_text(runtime.get("record_id"), "runtime.record_id", "VISION_SOURCE_INVALID")
+    runtime_ids = runtime.get("attachment_ids")
+    attachments = seal.get("attachments")
+    if (
+        not BASE_TOKEN.fullmatch(app_token)
+        or not TABLE_ID.fullmatch(table_id)
+        or not RECORD_ID.fullmatch(record_id)
+        or not isinstance(runtime_ids, list)
+        or not all(isinstance(item, str) and item.strip() for item in runtime_ids)
+        or seal.get("record_id") != record_id
+        or not isinstance(attachments, list)
+        or not all(isinstance(item, dict) for item in attachments)
+    ):
+        raise VisionError("VISION_SOURCE_INVALID", "视觉 Base 来源范围无效")
+    by_name: dict[str, dict[str, Any]] = {}
+    sealed_ids: list[str] = []
+    for index, item in enumerate(attachments):
+        token = required_text(item.get("file_token"), f"attachments[{index}].file_token", "VISION_SOURCE_INVALID")
+        saved_path = required_text(item.get("saved_path"), f"attachments[{index}].saved_path", "VISION_SOURCE_INVALID")
+        source_hash = required_text(item.get("sha256"), f"attachments[{index}].sha256", "VISION_SOURCE_INVALID")
+        size = item.get("size_bytes")
+        name = Path(saved_path).name
+        if (
+            not REMOTE_ID.fullmatch(token)
+            or not HEX64.fullmatch(source_hash)
+            or type(size) is not int
+            or size <= 0
+            or not name
+            or name in by_name
+            or item.get("record_id") != record_id
+        ):
+            raise VisionError("VISION_SOURCE_INVALID", "视觉附件封印内容无效", {"attachment": index})
+        by_name[name] = {
+            "schema_version": SOURCE_SCHEMA,
+            "app_token": app_token,
+            "table_id": table_id,
+            "record_id": record_id,
+            "attachment_field_id": required_text(item.get("field_id"), f"attachments[{index}].field_id", "VISION_SOURCE_INVALID"),
+            "attachment_field_name": "案件文档",
+            "attachment_id": token,
+            "attachment_name": name,
+            "attachment_size": size,
+            "attachment_sha256": source_hash,
+        }
+        sealed_ids.append(token)
+    if sorted(sealed_ids) != sorted(runtime_ids) or len(sealed_ids) != len(set(sealed_ids)):
+        raise VisionError("VISION_SOURCE_INVALID", "视觉附件封印与运行信封不一致")
+    bindings: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_id = str(task["task_id"])
+        source_file = str(task["source_file"])
+        root_name = source_file.split("::", 1)[0]
+        binding = by_name.get(root_name)
+        if binding is None:
+            raise VisionError(
+                "VISION_SOURCE_INVALID", "视觉任务无法绑定 Base 附件",
+                {"task_id": task_id, "source_file": source_file},
+            )
+        if "::" not in source_file and task.get("source_sha256") != binding["attachment_sha256"]:
+            raise VisionError("VISION_SOURCE_INVALID", "顶层视觉任务与附件哈希不一致", {"task_id": task_id})
+        bindings[task_id] = {**binding, "source_locator": source_file}
+    return bindings
+
+
 def parse_cli_response(source: str, label: str) -> dict[str, Any]:
     try:
         value = json.loads(source)
@@ -230,6 +303,29 @@ def parse_cli_response(source: str, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise VisionError("VISION_REMOTE_RESPONSE_INVALID", f"{label}返回值不是对象")
     return value
+
+
+def parse_command_response(stdout: str, stderr: str, label: str) -> tuple[dict[str, Any], str]:
+    output = stdout.strip()
+    if output:
+        return parse_cli_response(output, label), output
+    error_output = stderr.strip()
+    decoder = json.JSONDecoder()
+    candidates: list[tuple[dict[str, Any], str]] = []
+    for match in re.finditer(r"\{", error_output):
+        fragment = error_output[match.start():]
+        try:
+            value, end = decoder.raw_decode(fragment)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and not fragment[end:].strip():
+            candidates.append((value, fragment[:end]))
+    if candidates:
+        return candidates[-1]
+    raise VisionError(
+        "VISION_REMOTE_COMMAND_FAILED", f"{label}未返回可解析的 JSON",
+        {"stderr_tail": error_output[-1000:]},
+    )
 
 
 def run_lark(cli: str, args: list[str], cwd: Path, timeout: int, label: str) -> tuple[dict[str, Any], str]:
@@ -243,12 +339,16 @@ def run_lark(cli: str, args: list[str], cwd: Path, timeout: int, label: str) -> 
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise VisionError("VISION_REMOTE_COMMAND_FAILED", f"{label}命令执行失败", {"reason": str(exc)}) from exc
-    raw = completed.stdout.strip() or completed.stderr.strip()
-    response = parse_cli_response(raw, label)
+    response, raw = parse_command_response(completed.stdout, completed.stderr, label)
     if completed.returncode != 0 or response.get("ok") is not True:
+        error = response.get("error") if isinstance(response.get("error"), dict) else {}
         raise VisionError(
             "VISION_REMOTE_OPERATION_FAILED", f"{label}返回失败",
-            {"returncode": completed.returncode, "message": str(response.get("message") or response.get("msg") or response)},
+            {
+                "returncode": completed.returncode,
+                "code": error.get("code") or response.get("code"),
+                "message": str(error.get("message") or response.get("message") or response.get("msg") or response),
+            },
         )
     if response.get("identity") != "user":
         raise VisionError("VISION_IDENTITY_MISMATCH", f"{label}未使用飞书用户身份")
@@ -287,10 +387,8 @@ def base_state(task: dict[str, Any]) -> dict[str, Any]:
         "image_sha256": task["image_sha256"],
         "attempt": 1,
         "phase": "new",
-        "agent_attachment_id": "",
+        "source_binding_sha256": "",
         "agent_chat_id": "",
-        "attachment_request_sha256": "",
-        "attachment_response_sha256": "",
         "chat_request_sha256": "",
         "chat_create_response_sha256": "",
         "chat_read_response_sha256": "",
@@ -311,7 +409,7 @@ def load_state(path: Path, task: dict[str, Any]) -> dict[str, Any]:
         state.get("schema_version") != STATE_SCHEMA
         or type(state.get("attempt")) is not int
         or state["attempt"] < 1
-        or state.get("phase") not in {"new", "uploaded", "chat_created", "retryable_failed", "validated_complete"}
+        or state.get("phase") not in {"new", "chat_created", "retryable_failed", "validated_complete"}
     ):
         raise VisionError("VISION_STATE_INVALID", "视觉收集状态版本或阶段不正确")
     return state
@@ -459,13 +557,14 @@ def validated_object(path: Path, expected_hash: str, label: str) -> dict[str, An
     return value
 
 
-def validate_collection_receipt(task: dict[str, Any], receipts_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
+def validate_collection_receipt(
+    task: dict[str, Any], source: dict[str, Any], receipts_dir: Path, result: dict[str, Any],
+) -> dict[str, Any]:
     task_id = str(task["task_id"])
     receipt = read_object(receipt_path(receipts_dir, task_id), "VISION_RECEIPT_INVALID")
     keys = {
         "schema_version", "task_id", "source_sha256", "image_sha256", "agent_id", "attempt",
-        "agent_attachment_id", "agent_chat_id", "attachment_request_sha256",
-        "attachment_response_sha256", "chat_request_sha256", "chat_create_response_sha256",
+        "source_binding", "source_binding_sha256", "agent_chat_id", "chat_request_sha256", "chat_create_response_sha256",
         "chat_read_response_sha256",
     }
     require_keys(receipt, keys, keys, "视觉收集回执", "VISION_RECEIPT_INVALID")
@@ -476,30 +575,21 @@ def validate_collection_receipt(task: dict[str, Any], receipts_dir: Path, result
         or type(attempt) is not int
         or attempt < 1
         or any(receipt.get(key) != task.get(key) for key in ("task_id", "source_sha256", "image_sha256"))
+        or receipt.get("source_binding") != source
+        or receipt.get("source_binding_sha256") != sha256_text(
+            json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
     ):
         raise VisionError("VISION_RECEIPT_INVALID", "视觉收集回执与任务不一致", {"task_id": task_id})
-    if not REMOTE_ID.fullmatch(str(receipt.get("agent_attachment_id") or "")) or not REMOTE_ID.fullmatch(str(receipt.get("agent_chat_id") or "")):
+    if not REMOTE_ID.fullmatch(str(receipt.get("agent_chat_id") or "")):
         raise VisionError("VISION_RECEIPT_INVALID", "视觉收集回执远程 ID 不正确", {"task_id": task_id})
-    attachment_id = str(receipt["agent_attachment_id"])
     chat_id = str(receipt["agent_chat_id"])
-    saved_attachment_request = validated_object(
-        raw_path(receipts_dir, task_id, attempt, "attachment-request"),
-        str(receipt["attachment_request_sha256"]), "视觉附件请求",
-    )
-    if saved_attachment_request != attachment_request(task):
-        raise VisionError("VISION_RECEIPT_INVALID", "视觉附件请求与任务不一致", {"task_id": task_id})
-    attachment_response = validated_remote_response(
-        raw_path(receipts_dir, task_id, attempt, "attachment"),
-        str(receipt["attachment_response_sha256"]), "视觉附件响应",
-    )
-    if first_remote_id(attachment_response, "agent_attachment_id", "视觉附件响应") != attachment_id:
-        raise VisionError("VISION_RECEIPT_INVALID", "视觉附件 ID 与回执不一致", {"task_id": task_id})
     saved_chat_request = validated_object(
         raw_path(receipts_dir, task_id, attempt, "chat-request"),
         str(receipt["chat_request_sha256"]), "视觉会话请求",
     )
-    if saved_chat_request != chat_request(task, attachment_id):
-        raise VisionError("VISION_RECEIPT_INVALID", "视觉会话请求未唯一绑定附件和任务", {"task_id": task_id})
+    if saved_chat_request != chat_request(task, source):
+        raise VisionError("VISION_RECEIPT_INVALID", "视觉会话请求未唯一绑定 Base 来源和任务", {"task_id": task_id})
     chat_response = validated_remote_response(
         raw_path(receipts_dir, task_id, attempt, "chat-create"),
         str(receipt["chat_create_response_sha256"]), "视觉会话创建响应",
@@ -548,10 +638,8 @@ def recover_completed_state(
         "image_sha256": task["image_sha256"],
         "attempt": receipt["attempt"],
         "phase": "validated_complete",
-        "agent_attachment_id": receipt["agent_attachment_id"],
+        "source_binding_sha256": receipt["source_binding_sha256"],
         "agent_chat_id": receipt["agent_chat_id"],
-        "attachment_request_sha256": receipt["attachment_request_sha256"],
-        "attachment_response_sha256": receipt["attachment_response_sha256"],
         "chat_request_sha256": receipt["chat_request_sha256"],
         "chat_create_response_sha256": receipt["chat_create_response_sha256"],
         "chat_read_response_sha256": receipt["chat_read_response_sha256"],
@@ -562,7 +650,7 @@ def recover_completed_state(
 
 
 def collect_task_once(
-    task: dict[str, Any], image_root: Path, results_dir: Path, receipts_dir: Path,
+    task: dict[str, Any], source: dict[str, Any], image_root: Path, results_dir: Path, receipts_dir: Path,
     executable: str, wait_seconds: int, command_timeout: int, poll_seconds: int,
     overall_deadline: float,
 ) -> bool:
@@ -574,7 +662,7 @@ def collect_task_once(
         normalized, unresolved = validate_result(task, result_path)
         if unresolved or normalized["status"] != "complete":
             raise VisionError("VISION_RESULT_INCOMPLETE", "已缓存视觉结果不是完整结果", {"task_id": task_id})
-        receipt = validate_collection_receipt(task, receipts_dir, read_object(result_path))
+        receipt = validate_collection_receipt(task, source, receipts_dir, read_object(result_path))
         if state["phase"] != "validated_complete":
             recover_completed_state(task, state, receipt, current_state_path)
         return True
@@ -586,33 +674,10 @@ def collect_task_once(
 
     if time.monotonic() >= overall_deadline:
         raise VisionError("VISION_TOTAL_TIMEOUT", "视觉任务总等待时间已用尽", {"task_id": task_id})
-    image, before = verify_image(task, image_root)
+    _, before = verify_image(task, image_root)
     attempt = int(state["attempt"])
     if state["phase"] == "new":
-        attachment_request_path = raw_path(receipts_dir, task_id, attempt, "attachment-request")
-        atomic_write(attachment_request_path, json.dumps(attachment_request(task), ensure_ascii=False, indent=2))
-        attachment_request_hash = sha256_file(attachment_request_path)
-        response, raw = run_lark(
-            executable,
-            [
-                "api", "POST", f"/open-apis/aily/v1/agents/{AGENT_ID}/attachments",
-                "--as", "user", "--file", image.name, "--data", '{"type":"image"}', "--json",
-            ],
-            image.parent, command_timeout, "视觉附件上传",
-        )
-        attachment_hash = write_raw(raw_path(receipts_dir, task_id, attempt, "attachment"), raw)
-        _, after = verify_image(task, image_root)
-        if before != after:
-            raise VisionError("VISION_SNAPSHOT_INVALID", "视觉工件在上传期间发生变化", {"task_id": task_id})
-        state.update({
-            "phase": "uploaded",
-            "agent_attachment_id": first_remote_id(response, "agent_attachment_id", "视觉附件上传"),
-            "attachment_request_sha256": attachment_request_hash,
-            "attachment_response_sha256": attachment_hash,
-        })
-        save_state(current_state_path, state)
-    if state["phase"] == "uploaded":
-        request = chat_request(task, str(state["agent_attachment_id"]))
+        request = chat_request(task, source)
         chat_request_path = raw_path(receipts_dir, task_id, attempt, "chat-request")
         atomic_write(chat_request_path, json.dumps(request, ensure_ascii=False, indent=2))
         chat_request_hash = sha256_file(chat_request_path)
@@ -625,8 +690,14 @@ def collect_task_once(
             receipts_dir.resolve(), command_timeout, "视觉会话创建",
         )
         chat_hash = write_raw(raw_path(receipts_dir, task_id, attempt, "chat-create"), raw)
+        _, after = verify_image(task, image_root)
+        if before != after:
+            raise VisionError("VISION_SNAPSHOT_INVALID", "视觉工件在会话创建期间发生变化", {"task_id": task_id})
         state.update({
             "phase": "chat_created",
+            "source_binding_sha256": sha256_text(
+                json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            ),
             "agent_chat_id": first_remote_id(response, "agent_chat_id", "视觉会话创建"),
             "chat_request_sha256": chat_request_hash,
             "chat_create_response_sha256": chat_hash,
@@ -680,10 +751,9 @@ def collect_task_once(
             "image_sha256": task["image_sha256"],
             "agent_id": AGENT_ID,
             "attempt": attempt,
-            "agent_attachment_id": state["agent_attachment_id"],
+            "source_binding": source,
+            "source_binding_sha256": state["source_binding_sha256"],
             "agent_chat_id": state["agent_chat_id"],
-            "attachment_request_sha256": state["attachment_request_sha256"],
-            "attachment_response_sha256": state["attachment_response_sha256"],
             "chat_request_sha256": state["chat_request_sha256"],
             "chat_create_response_sha256": state["chat_create_response_sha256"],
             "chat_read_response_sha256": state["chat_read_response_sha256"],
@@ -696,7 +766,7 @@ def collect_task_once(
                 "VISION_RESULT_INCOMPLETE", "视觉子智能体未返回完整可用的逐字结果",
                 {"task_id": task_id, "status": normalized["status"], "unresolved": unresolved},
             )
-        validate_collection_receipt(task, receipts_dir, parsed)
+        validate_collection_receipt(task, source, receipts_dir, parsed)
     except VisionError as exc:
         candidate_path.unlink(missing_ok=True)
         mark_retryable_failure(current_state_path, state, exc)
@@ -707,11 +777,13 @@ def collect_task_once(
 
 
 def collect(
-    tasks_path: Path, image_root: Path, results_dir: Path, receipts_dir: Path,
+    runtime_path: Path, seal_path: Path, tasks_path: Path, image_root: Path,
+    results_dir: Path, receipts_dir: Path,
     cli: str, wait_seconds: int, poll_seconds: int, command_timeout: int,
     total_wait_seconds: int, max_attempts: int, workers: int,
 ) -> dict[str, Any]:
     tasks = load_tasks(tasks_path, image_root)
+    sources = load_source_bindings(runtime_path, seal_path, tasks)
     executable = shutil.which(cli) if os.sep not in cli else cli
     if tasks and not executable:
         raise VisionError("LARK_CLI_UNAVAILABLE", "未找到 lark-cli")
@@ -728,7 +800,7 @@ def collect(
             while True:
                 try:
                     was_cached = collect_task_once(
-                        task, image_root, results_dir, receipts_dir, str(executable),
+                        task, sources[task_id], image_root, results_dir, receipts_dir, str(executable),
                         wait_seconds, command_timeout, poll_seconds, overall_deadline,
                     )
                     return int(was_cached)
@@ -747,10 +819,12 @@ def collect(
 
 
 def reconcile(
-    tasks_path: Path, image_root: Path, results_dir: Path, receipts_dir: Path,
+    runtime_path: Path, seal_path: Path, tasks_path: Path, image_root: Path,
+    results_dir: Path, receipts_dir: Path,
     corpus_path: Path, output_corpus: Path, evidence_path: Path,
 ) -> dict[str, Any]:
     tasks = load_tasks(tasks_path, image_root)
+    sources = load_source_bindings(runtime_path, seal_path, tasks)
     try:
         source_corpus = corpus_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -771,16 +845,15 @@ def reconcile(
         if state["phase"] != "validated_complete":
             raise VisionError("VISION_STATE_INVALID", "视觉结果未处于已验证完成状态", {"task_id": task_id})
         raw_result = read_object(path)
-        validate_collection_receipt(task, receipts_dir, raw_result)
+        validate_collection_receipt(task, sources[task_id], receipts_dir, raw_result)
         result, result_unresolved = validate_result(task, path)
         receipt = read_object(receipt_path(receipts_dir, task_id), "VISION_RECEIPT_INVALID")
         result["collection"] = {
             "agent_id": receipt["agent_id"],
             "attempt": receipt["attempt"],
-            "agent_attachment_id": receipt["agent_attachment_id"],
+            "source_binding": receipt["source_binding"],
+            "source_binding_sha256": receipt["source_binding_sha256"],
             "agent_chat_id": receipt["agent_chat_id"],
-            "attachment_request_sha256": receipt["attachment_request_sha256"],
-            "attachment_response_sha256": receipt["attachment_response_sha256"],
             "chat_request_sha256": receipt["chat_request_sha256"],
             "chat_create_response_sha256": receipt["chat_create_response_sha256"],
             "chat_read_response_sha256": receipt["chat_read_response_sha256"],
@@ -831,6 +904,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect and validate visual-agent evidence.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     collect_parser = subparsers.add_parser("collect")
+    collect_parser.add_argument("--runtime", type=Path, required=True)
+    collect_parser.add_argument("--download-seal", type=Path, required=True)
     collect_parser.add_argument("--tasks", type=Path, required=True)
     collect_parser.add_argument("--image-root", type=Path, required=True)
     collect_parser.add_argument("--results-dir", type=Path, required=True)
@@ -843,6 +918,8 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--max-attempts", type=int, default=3)
     collect_parser.add_argument("--workers", type=int, default=3)
     reconcile_parser = subparsers.add_parser("reconcile")
+    reconcile_parser.add_argument("--runtime", type=Path, required=True)
+    reconcile_parser.add_argument("--download-seal", type=Path, required=True)
     reconcile_parser.add_argument("--tasks", type=Path, required=True)
     reconcile_parser.add_argument("--image-root", type=Path, required=True)
     reconcile_parser.add_argument("--results-dir", type=Path, required=True)
@@ -863,13 +940,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise VisionError("VISION_ARGUMENT_INVALID", "等待、轮询和命令超时必须为正整数")
             output = collect(
-                args.tasks, args.image_root, args.results_dir, args.receipts_dir,
+                args.runtime, args.download_seal, args.tasks, args.image_root,
+                args.results_dir, args.receipts_dir,
                 args.lark_cli, args.wait_seconds, args.poll_seconds, args.command_timeout,
                 args.total_wait_seconds, args.max_attempts, args.workers,
             )
         else:
             output = reconcile(
-                args.tasks, args.image_root, args.results_dir, args.receipts_dir,
+                args.runtime, args.download_seal, args.tasks, args.image_root,
+                args.results_dir, args.receipts_dir,
                 args.source_corpus, args.output_corpus, args.evidence,
             )
         print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))

@@ -25,7 +25,6 @@ from evidence_contract import (
     VISION_AGENT_NAME,
     VISION_RESULT_SCHEMA,
     VISION_TASK_SCHEMA,
-    vision_attachment_request,
     vision_chat_request,
 )
 
@@ -53,10 +52,10 @@ BASE_FIELD_NAMES = {
 NON_EVIDENTIARY_ROWS = {"completeness_rows", "quality_rows"}
 VISION_PACK_SCHEMA = "vision-evidence-pack/v3"
 EXPECTED_RUNTIME_TYPE = "dispute-material-run/v6.7"
-EXPECTED_SKILL_VERSION = "6.7.3"
-EXPECTED_COMPONENT_BUILD = "6.7.3-skill-6.7.3"
+EXPECTED_SKILL_VERSION = "6.7.4"
+EXPECTED_COMPONENT_BUILD = "6.7.4-skill-6.7.4"
 EXPECTED_OPERATION = "process_target_record"
-STRONG_LEGACY_BASELINE_VERSIONS = {"6.7.0", "6.7.1", "6.7.2"}
+STRONG_LEGACY_BASELINE_VERSIONS = {"6.7.0", "6.7.1", "6.7.2", "6.7.3"}
 EXPECTED_APP_TOKEN = "K4nObpF5la8ertskcVccv2LknNh"
 EXPECTED_TABLE_ID = "tbllz7nrxSIH8frX"
 EXPECTED_BASELINE_FIELD = "材料处理基线"
@@ -78,7 +77,7 @@ EXPECTED_AGENT_CONTRACT = {
     "vision_agent_name": VISION_AGENT_NAME,
     "vision_agent_id": VISION_AGENT_ID,
     "vision_result_schema": VISION_RESULT_SCHEMA,
-    "vision_transport": "aily_attachment_chat",
+    "vision_transport": "base_record_chat",
     "audio_transcription_service": "Feishu Minutes",
     "audio_result_schema": AUDIO_RESULT_SCHEMA,
     "write_policy": "main_agent_only",
@@ -915,11 +914,11 @@ def validate_vision_remote_artifacts(
     receipt = read_json(receipt_path)
     receipt_keys = {
         "schema_version", "task_id", "source_sha256", "image_sha256", "agent_id", "attempt",
-        "agent_attachment_id", "agent_chat_id", "attachment_request_sha256",
-        "attachment_response_sha256", "chat_request_sha256", "chat_create_response_sha256",
+        "source_binding", "source_binding_sha256", "agent_chat_id",
+        "chat_request_sha256", "chat_create_response_sha256",
         "chat_read_response_sha256",
     }
-    if set(receipt) != receipt_keys or receipt.get("schema_version") != "vision-collection-receipt/v2":
+    if set(receipt) != receipt_keys or receipt.get("schema_version") != "vision-collection-receipt/v3":
         raise ReportError("VISION_RECEIPT_INVALID", "视觉收集回执结构不正确", {"task_id": task_id})
     expected_collection = {key: receipt[key] for key in receipt_keys - {
         "schema_version", "task_id", "source_sha256", "image_sha256",
@@ -934,28 +933,22 @@ def validate_vision_remote_artifacts(
     attempt = receipt.get("attempt")
     if type(attempt) is not int or attempt < 1:
         raise ReportError("VISION_RECEIPT_INVALID", "视觉收集尝试编号不正确", {"task_id": task_id})
-    attachment_id = scalarish(receipt.get("agent_attachment_id"))
+    source = receipt.get("source_binding")
+    if not isinstance(source, dict):
+        raise ReportError("VISION_RECEIPT_INVALID", "视觉收集回执缺少 Base 来源绑定", {"task_id": task_id})
+    source_hash = hashlib.sha256(
+        json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if receipt.get("source_binding_sha256") != source_hash:
+        raise ReportError("VISION_RECEIPT_INVALID", "视觉 Base 来源绑定哈希不一致", {"task_id": task_id})
     chat_id = scalarish(receipt.get("agent_chat_id"))
-
-    attachment_request = validated_vision_object(
-        vision_raw_path(receipts_dir, task_id, attempt, "attachment-request"),
-        scalarish(receipt.get("attachment_request_sha256")), "视觉附件请求",
-    )
-    if attachment_request != vision_attachment_request(task):
-        raise ReportError("VISION_RECEIPT_INVALID", "视觉附件请求与当前任务不一致", {"task_id": task_id})
-    attachment_response = validated_vision_remote(
-        vision_raw_path(receipts_dir, task_id, attempt, "attachment"),
-        scalarish(receipt.get("attachment_response_sha256")), "视觉附件响应",
-    )
-    if unique_vision_id(attachment_response, "agent_attachment_id", "视觉附件响应") != attachment_id:
-        raise ReportError("VISION_RECEIPT_INVALID", "视觉附件响应 ID 与回执不一致", {"task_id": task_id})
 
     chat_request = validated_vision_object(
         vision_raw_path(receipts_dir, task_id, attempt, "chat-request"),
         scalarish(receipt.get("chat_request_sha256")), "视觉会话请求",
     )
-    if chat_request != vision_chat_request(task, attachment_id):
-        raise ReportError("VISION_RECEIPT_INVALID", "视觉会话请求未绑定当前附件和任务", {"task_id": task_id})
+    if chat_request != vision_chat_request(task, source):
+        raise ReportError("VISION_RECEIPT_INVALID", "视觉会话请求未绑定当前 Base 来源和任务", {"task_id": task_id})
     chat_create = validated_vision_remote(
         vision_raw_path(receipts_dir, task_id, attempt, "chat-create"),
         scalarish(receipt.get("chat_create_response_sha256")), "视觉会话创建响应",
@@ -1043,9 +1036,18 @@ def validate_vision_evidence(
         producer = item.get("producer")
         collection = item.get("collection")
         collection_hashes = {
-            "attachment_request_sha256", "attachment_response_sha256", "chat_request_sha256",
+            "source_binding_sha256", "chat_request_sha256",
             "chat_create_response_sha256", "chat_read_response_sha256",
         }
+        source_binding = collection.get("source_binding") if isinstance(collection, dict) else None
+        source_keys = {
+            "schema_version", "app_token", "table_id", "record_id", "attachment_field_id",
+            "attachment_field_name", "attachment_id", "attachment_name", "attachment_size",
+            "attachment_sha256", "source_locator",
+        }
+        source_binding_hash = hashlib.sha256(
+            json.dumps(source_binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest() if isinstance(source_binding, dict) else ""
         if (
             not re.fullmatch(r"vis_[0-9a-f]{20}", task_id)
             or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
@@ -1056,14 +1058,23 @@ def validate_vision_evidence(
             or set(producer) != {"agent_name"}
             or not isinstance(collection, dict)
             or set(collection) != {
-                "agent_id", "attempt", "agent_attachment_id", "agent_chat_id", *collection_hashes,
+                "agent_id", "attempt", "source_binding", "agent_chat_id", *collection_hashes,
             }
             or collection.get("agent_id") != VISION_AGENT_ID
             or type(collection.get("attempt")) is not int
             or collection["attempt"] < 1
-            or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(collection.get("agent_attachment_id")))
             or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(collection.get("agent_chat_id")))
             or any(not re.fullmatch(r"[0-9a-f]{64}", scalarish(collection.get(key))) for key in collection_hashes)
+            or not isinstance(source_binding, dict)
+            or set(source_binding) != source_keys
+            or source_binding.get("schema_version") != "vision-base-source/v1"
+            or source_binding.get("attachment_field_name") != "案件文档"
+            or source_binding.get("source_locator") != item.get("source_file")
+            or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", scalarish(source_binding.get("attachment_id")))
+            or not re.fullmatch(r"[0-9a-f]{64}", scalarish(source_binding.get("attachment_sha256")))
+            or type(source_binding.get("attachment_size")) is not int
+            or source_binding["attachment_size"] <= 0
+            or collection.get("source_binding_sha256") != source_binding_hash
         ):
             raise ReportError("VISION_EVIDENCE_INVALID", "视觉证据任务身份、哈希或状态不正确", {"task_id": task_id})
         if task_id in task_map:

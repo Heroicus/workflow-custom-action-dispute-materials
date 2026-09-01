@@ -3,7 +3,7 @@ name: organize-dispute-materials
 description: 读取小组件指定的一条案件记录，从全部附件提取事实，生成固定格式报告，并经远端读回后两阶段回写同一条 Base 记录。
 license: Internal
 metadata:
-  version: "6.7.3"
+  version: "6.7.4"
   tier: STANDARD
   category: legal-automation
 ---
@@ -16,8 +16,8 @@ metadata:
 
 ```text
 operation = process_target_record
-required_skill_version = 6.7.3
-component_build = 6.7.3-skill-6.7.3
+required_skill_version = 6.7.4
+component_build = 6.7.4-skill-6.7.4
 mode = initial | supplement
 main_agent = 纠纷材料整理专员
 vision_agent = 纠纷材料视觉核验员 / 只读
@@ -78,16 +78,20 @@ python3 "$SKILL_ROOT/scripts/material_tool.py" extract \
 
 ## 2. 视觉逐字核验
 
-视觉任务由程序按清单生成，使用最多四个受限工作线并设置小于小组件租约的全局时限。`vision_tool.py collect` 为每项任务上传一张图片附件，以用户身份创建一次 `纠纷材料视觉核验员` 会话并读回结果。主智能体不得自行调用子智能体，不得组合多项任务，不得把本地路径当作图片输入，也不得改写子智能体返回值。每项远端附件、会话和最终读回均保存原始响应及 SHA-256。
+视觉任务由程序按清单生成，使用最多四个受限工作线并设置小于小组件租约的全局时限。`vision_tool.py collect` 将每项任务绑定到附件下载封印中的唯一 Base 附件，以用户身份创建一次 `纠纷材料视觉核验员` 文本会话。视觉智能体只读同一记录并重新下载指定附件，再打开指定视觉单元逐字核验。主智能体不得自行调用子智能体，不得组合多项任务，不得把本地路径当作图片输入，也不得改写子智能体返回值。每项 Base 来源绑定、会话和最终读回均保存原始响应及 SHA-256。
 
 ```bash
 python3 "$SKILL_ROOT/scripts/vision_tool.py" collect \
+  --runtime runtime.json \
+  --download-seal attachment-download-seal.json \
   --tasks extracted/vision-tasks.json \
   --image-root extracted/vision-pages \
   --results-dir extracted/vision-results \
   --receipts-dir extracted/vision-receipts
 
 python3 "$SKILL_ROOT/scripts/vision_tool.py" reconcile \
+  --runtime runtime.json \
+  --download-seal attachment-download-seal.json \
   --tasks extracted/vision-tasks.json \
   --image-root extracted/vision-pages \
   --results-dir extracted/vision-results \

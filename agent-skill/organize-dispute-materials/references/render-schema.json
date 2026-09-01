@@ -1,5 +1,5 @@
 {
-  "schema_version": "6.7.3",
+  "schema_version": "6.7.4",
   "template": "report-template.xml",
   "required_scalars": [
     "case_number"
