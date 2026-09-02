@@ -1,16 +1,37 @@
-# 纠纷材料整理组件 6.9.0 / Skill 6.9.0 发布步骤
+# 纠纷材料工作流投递组件发布验收
 
-1. 确认应用 `cli_aa1cd1168679dbc3` 已发布 Base 读写、附件下载、Aily 附件与会话、云盘、妙记、文档和协作者权限。
-2. 确认新应用以可编辑协作者身份加入案件 Base，并用应用身份真实读取目标记录。
-3. 保留案件表隐藏文本字段 `材料处理基线`。
-4. 更新纠纷材料视觉核验员。使用 `视觉核验子智能体员工档案配置.md`，删除全部技能和反向智能体调用，只保留附件会话渠道。
-5. 导入 `organize-dispute-materials-v6.9.0.zip`。
-6. 更新纠纷材料整理专员。保留飞书内置能力和本 Skill，删除单独的视觉智能体调用技能，使用 `智能体员工档案配置.md` 更新员工档案。
-7. 发布纠纷材料视觉核验员和纠纷材料整理专员。
-8. 在新应用中为 `blk_6a966d0b27410bcc81706268` 选择已上传的小组件 `6.9.0`，更新类型选择强制更新，保存并发布应用版本。
-9. 在 Base 自动化中选择新应用的小组件，只映射 `targetRecordId`。
-10. 使用一条隔离记录完成 initial，再在同一记录追加一个附件完成 supplement。
-11. 两次运行都保存运行信封、组件 build、Skill 版本、视觉附件上传回执、视觉会话与结果读回、妙记逐字稿读回、报告 revision 和正文哈希、权限列表以及 Base 最终读回。
-12. 两次 `validate-completion` 都返回 `completed` 后才能标记上线完成。
+版本：7.0.0
 
-`6.7.0` 至 `6.7.4` 强基线和 `6.5.x` 弱基线首次运行会全量重写。后续向同一记录追加附件时，报告 URL 必须保持不变。
+## 工作流要求
+
+1. 发布纠纷材料处理工作流。
+2. Start 定义 record_id、dispatch_id、trigger_kind 三个文本输入。
+3. End 输出 JSON 字符串，且包含与 Start 完全相同的 record_id、dispatch_id、trigger_kind。
+4. 应用具备 aily:skill:write 权限。
+
+## 自动化映射
+
+| 触发场景 | targetRecordId | triggerKind |
+| --- | --- | --- |
+| 新增记录 | 当前记录的 Record ID | record_created |
+| 案件文档变更 | 当前记录的 Record ID | case_document_changed |
+
+## 上传与绑定
+
+```bash
+npm run build
+npm run upload
+```
+
+在飞书开发者后台选择新上传的小组件版本，保存多维表格自动化配置后发布应用。
+
+## 验收
+
+一次自动化运行必须返回：
+
+- accepted=true
+- dispatchState=success
+- workflowStatus=success
+- workflowOutput 中的 record_id、dispatch_id、trigger_kind 与本次输入一致
+
+任一项不满足即视为未完成。
