@@ -1,6 +1,6 @@
 {
   "name": "organize-dispute-materials-workflow-shortcut",
-  "version": "7.0.0",
+  "version": "7.0.2",
   "description": "Feishu Base action that starts the dispute-material workflow skill for one record",
   "main": "index.js",
   "scripts": {

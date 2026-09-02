@@ -8,7 +8,7 @@ const OPEN_API = "https://open.feishu.cn/open-apis";
 const AILY_APP_ID = "spring_12dd737859__c";
 const WORKFLOW_SKILL_ID = "skill_a4563af760fc";
 const WORKFLOW_START_URL = OPEN_API + "/aily/v1/apps/" + AILY_APP_ID + "/skills/" + WORKFLOW_SKILL_ID + "/start";
-const BUILD_ID = "7.0.0-workflow-skill";
+const BUILD_ID = "7.0.2-workflow-skill";
 const TRIGGER_KINDS = new Set(["record_created", "case_document_changed"]);
 
 type UnknownRecord = Record<string, unknown>;

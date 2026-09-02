@@ -1,10 +1,18 @@
 {
   "name": "纠纷材料处理自动化",
-  "component_build": "7.0.0-workflow-skill",
-  "component_block_type_id": "blk_6a7e783b4b408cb2ed5d02ca",
+  "component_build": "7.0.2-workflow-skill",
+  "component_block_type_id": "blk_6a966d0b27410bcc81706268",
   "workflow_skill": {
-    "start_input": ["record_id", "dispatch_id", "trigger_kind"],
-    "required_output": ["record_id", "dispatch_id", "trigger_kind"]
+    "start_input": [
+      "record_id",
+      "dispatch_id",
+      "trigger_kind"
+    ],
+    "required_output": [
+      "record_id",
+      "dispatch_id",
+      "trigger_kind"
+    ]
   },
   "automations": [
     {
